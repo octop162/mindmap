@@ -28,6 +28,17 @@ const DIRS = {
   "both-v": { axis: "v", both: true }, down: { axis: "v", both: false }
 };
 const STORE = "mm-doc-v1";
+// Separate from STORE: UI/theme preferences persist automatically on every change,
+// unlike the document itself which only saves on an explicit 保存 click.
+const SETTINGS_STORE = "mm-settings-v1";
+function loadSettings() {
+  try {
+    const raw = localStorage.getItem(SETTINGS_STORE);
+    return raw ? JSON.parse(raw) : {};
+  } catch (e) {
+    return {};
+  }
+}
 const SIDEBAR_MIN = 220;
 const SIDEBAR_MAX = 640;
 
@@ -89,21 +100,23 @@ class MindMapApp extends React.Component {
   constructor(props) {
     super(props);
     const seed = buildSeed(SEED);
+    const saved = loadSettings();
+    const savedTheme = saved.theme || {};
     this.state = {
       nodes: seed.nodes, rootId: seed.rootId, seq: seed.seq,
       sel: seed.rootId, selVisible: true, editing: null,
       pan: { x: 0, y: 0 }, zoom: 1,
-      sidebarOpen: this.props.sidebarOpen !== false,
-      sidebarWidth: 330,
+      sidebarOpen: saved.sidebarOpen != null ? saved.sidebarOpen : this.props.sidebarOpen !== false,
+      sidebarWidth: saved.sidebarWidth || 330,
       panel: "src",
-      dir: this.props.direction || "both-h",
+      dir: saved.dir || this.props.direction || "both-h",
       theme: {
-        ink: this.props.ink || "cyan",
-        shape: this.props.nodeShape || "box",
-        edge: this.props.edgeShape || "curve",
-        size: this.props.textSize || "md",
-        invert: false,
-        svgTransparentBg: false
+        ink: savedTheme.ink || this.props.ink || "cyan",
+        shape: savedTheme.shape || this.props.nodeShape || "box",
+        edge: savedTheme.edge || this.props.edgeShape || "curve",
+        size: savedTheme.size || this.props.textSize || "md",
+        invert: savedTheme.invert || false,
+        svgTransparentBg: savedTheme.svgTransparentBg || false
       },
       past: [], future: [], clip: null,
       src: "", srcDirty: false, drop: null, ghost: null, toast: ""
@@ -135,6 +148,20 @@ class MindMapApp extends React.Component {
     window.removeEventListener("mousemove", this._move);
     window.removeEventListener("mouseup", this._up);
     if (this.canvas && this._wheel) this.canvas.removeEventListener("wheel", this._wheel);
+  }
+  componentDidUpdate(prevProps, prevState) {
+    if (prevState.theme !== this.state.theme || prevState.dir !== this.state.dir
+      || prevState.sidebarWidth !== this.state.sidebarWidth || prevState.sidebarOpen !== this.state.sidebarOpen) {
+      this.saveSettings();
+    }
+  }
+  saveSettings() {
+    try {
+      localStorage.setItem(SETTINGS_STORE, JSON.stringify({
+        theme: this.state.theme, dir: this.state.dir,
+        sidebarWidth: this.state.sidebarWidth, sidebarOpen: this.state.sidebarOpen
+      }));
+    } catch (e) { /* best-effort; a full/unavailable localStorage shouldn't break the app */ }
   }
 
   /* ——— measurement & layout ——— */
