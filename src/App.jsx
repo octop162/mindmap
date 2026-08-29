@@ -16,7 +16,10 @@ const SIZES = {
 const INK = {
   paper: { solid: "var(--color-text)", text: "var(--color-neutral-900)", edge: "var(--color-neutral-400)", ring: "var(--color-text)" },
   cyan: { solid: "var(--color-accent)", text: "var(--color-accent-700)", edge: "var(--color-accent-400)", ring: "var(--color-accent)" },
-  magenta: { solid: "var(--color-accent-2)", text: "var(--color-accent-2-700)", edge: "var(--color-accent-2-400)", ring: "var(--color-accent-2)" }
+  magenta: { solid: "var(--color-accent-2)", text: "var(--color-accent-2-700)", edge: "var(--color-accent-2-400)", ring: "var(--color-accent-2)" },
+  yellow: { solid: "var(--color-yellow-500)", text: "var(--color-yellow-700)", edge: "var(--color-yellow-400)", ring: "var(--color-yellow-500)" },
+  green: { solid: "var(--color-green-500)", text: "var(--color-green-700)", edge: "var(--color-green-400)", ring: "var(--color-green-500)" },
+  purple: { solid: "var(--color-purple-500)", text: "var(--color-purple-700)", edge: "var(--color-purple-400)", ring: "var(--color-purple-500)" }
 };
 const DIRS = {
   "both-h": { axis: "h", both: true }, right: { axis: "h", both: false },
@@ -747,7 +750,9 @@ class MindMapApp extends React.Component {
       onCanvasDouble: (e) => { if (e.target === this.canvas) this.fit(); },
       noMenu: (e) => e.preventDefault(),
       inkPaper: s.theme.ink === "paper", inkCyan: s.theme.ink === "cyan", inkMagenta: s.theme.ink === "magenta",
+      inkYellow: s.theme.ink === "yellow", inkGreen: s.theme.ink === "green", inkPurple: s.theme.ink === "purple",
       setInkPaper: (e) => this.pick(e, () => this.setTheme("ink", "paper")), setInkCyan: (e) => this.pick(e, () => this.setTheme("ink", "cyan")), setInkMagenta: (e) => this.pick(e, () => this.setTheme("ink", "magenta")),
+      setInkYellow: (e) => this.pick(e, () => this.setTheme("ink", "yellow")), setInkGreen: (e) => this.pick(e, () => this.setTheme("ink", "green")), setInkPurple: (e) => this.pick(e, () => this.setTheme("ink", "purple")),
       shapeBox: s.theme.shape === "box", shapeUnderline: s.theme.shape === "underline", shapeBare: s.theme.shape === "bare",
       setShapeBox: (e) => this.pick(e, () => this.setTheme("shape", "box")), setShapeUnderline: (e) => this.pick(e, () => this.setTheme("shape", "underline")), setShapeBare: (e) => this.pick(e, () => this.setTheme("shape", "bare")),
       edgeCurve: s.theme.edge === "curve", edgeOrtho: s.theme.edge === "ortho", edgeLine: s.theme.edge === "line",
@@ -844,10 +849,17 @@ class MindMapApp extends React.Component {
                   </div>
                   <div className="field">
                     <label>配色</label>
-                    <div className="seg">
-                      <label className="seg-opt">紙<input type="radio" name="mmink" checked={v.inkPaper} onChange={v.setInkPaper} style={styleObj("position:absolute;opacity:0;width:0;height:0")} /></label>
-                      <label className="seg-opt">シアン<input type="radio" name="mmink" checked={v.inkCyan} onChange={v.setInkCyan} style={styleObj("position:absolute;opacity:0;width:0;height:0")} /></label>
-                      <label className="seg-opt">マゼンタ<input type="radio" name="mmink" checked={v.inkMagenta} onChange={v.setInkMagenta} style={styleObj("position:absolute;opacity:0;width:0;height:0")} /></label>
+                    <div style={styleObj("display:flex;flex-wrap:wrap;gap:6px")}>
+                      <div className="seg">
+                        <label className="seg-opt">紙<input type="radio" name="mmink" checked={v.inkPaper} onChange={v.setInkPaper} style={styleObj("position:absolute;opacity:0;width:0;height:0")} /></label>
+                        <label className="seg-opt">シアン<input type="radio" name="mmink" checked={v.inkCyan} onChange={v.setInkCyan} style={styleObj("position:absolute;opacity:0;width:0;height:0")} /></label>
+                        <label className="seg-opt">マゼンタ<input type="radio" name="mmink" checked={v.inkMagenta} onChange={v.setInkMagenta} style={styleObj("position:absolute;opacity:0;width:0;height:0")} /></label>
+                      </div>
+                      <div className="seg">
+                        <label className="seg-opt">イエロー<input type="radio" name="mmink" checked={v.inkYellow} onChange={v.setInkYellow} style={styleObj("position:absolute;opacity:0;width:0;height:0")} /></label>
+                        <label className="seg-opt">グリーン<input type="radio" name="mmink" checked={v.inkGreen} onChange={v.setInkGreen} style={styleObj("position:absolute;opacity:0;width:0;height:0")} /></label>
+                        <label className="seg-opt">パープル<input type="radio" name="mmink" checked={v.inkPurple} onChange={v.setInkPurple} style={styleObj("position:absolute;opacity:0;width:0;height:0")} /></label>
+                      </div>
                     </div>
                   </div>
                   <div className="field">

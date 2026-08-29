@@ -49,6 +49,40 @@
      never take it. */
   --color-process-yellow: #edbb00;
 
+  /* Mind map ink palette — additional ramps for the mind map's node-color
+     theme, beyond the cyan/magenta accents. Yellow completes the CMY
+     process-ink set (--color-process-yellow is its 500 step); green and
+     purple are extra branch colors with no other role in the system. */
+  --color-yellow-100: #fff8e0;
+  --color-yellow-200: #ffedb0;
+  --color-yellow-300: #ffdc70;
+  --color-yellow-400: #f5c530;
+  --color-yellow-500: #edbb00;
+  --color-yellow-600: #c49900;
+  --color-yellow-700: #997700;
+  --color-yellow-800: #6b5400;
+  --color-yellow-900: #423500;
+
+  --color-green-100: #eaf6ec;
+  --color-green-200: #cceed3;
+  --color-green-300: #99dda8;
+  --color-green-400: #5cbf76;
+  --color-green-500: #2f9d4c;
+  --color-green-600: #1c7e39;
+  --color-green-700: #0f632c;
+  --color-green-800: #0a4620;
+  --color-green-900: #0a2e17;
+
+  --color-purple-100: #f5eefc;
+  --color-purple-200: #e6d3f7;
+  --color-purple-300: #d0aaf0;
+  --color-purple-400: #b47be0;
+  --color-purple-500: #9451c9;
+  --color-purple-600: #7735a8;
+  --color-purple-700: #5f2686;
+  --color-purple-800: #451c60;
+  --color-purple-900: #2c1240;
+
   --font-heading: "Source Serif 4", system-ui, sans-serif;
   --font-heading-weight: 600;
   --font-body: "Source Serif 4", system-ui, sans-serif;
