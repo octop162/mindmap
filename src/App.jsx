@@ -111,12 +111,12 @@ class MindMapApp extends React.Component {
       panel: "src",
       dir: saved.dir || this.props.direction || "both-h",
       theme: {
-        ink: savedTheme.ink || this.props.ink || "cyan",
+        ink: savedTheme.ink || this.props.ink || "multi",
         shape: savedTheme.shape || this.props.nodeShape || "box",
         edge: savedTheme.edge || this.props.edgeShape || "curve",
-        size: savedTheme.size || this.props.textSize || "md",
-        invert: savedTheme.invert || false,
-        svgTransparentBg: savedTheme.svgTransparentBg || false
+        size: savedTheme.size || this.props.textSize || "lg",
+        invert: savedTheme.invert !== undefined ? savedTheme.invert : true,
+        svgTransparentBg: savedTheme.svgTransparentBg !== undefined ? savedTheme.svgTransparentBg : true
       },
       past: [], future: [], clip: null,
       src: "", srcDirty: false, drop: null, ghost: null, toast: ""
