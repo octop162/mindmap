@@ -21,6 +21,8 @@ const INK = {
   green: { solid: "var(--color-green-500)", text: "var(--color-green-700)", edge: "var(--color-green-400)", ring: "var(--color-green-500)" },
   purple: { solid: "var(--color-purple-500)", text: "var(--color-purple-700)", edge: "var(--color-purple-400)", ring: "var(--color-purple-500)" }
 };
+// "multi" (カラフル) cycles through these per top-level branch instead of using one ink for the whole map.
+const MULTI_PALETTE = ["cyan", "magenta", "green", "purple", "yellow"].map((k) => INK[k]);
 const DIRS = {
   "both-h": { axis: "h", both: true }, right: { axis: "h", both: false },
   "both-v": { axis: "v", both: true }, down: { axis: "v", both: false }
@@ -52,6 +54,17 @@ function detach(nodes, id) {
 function subtree(nodes, id) {
   const n = nodes[id];
   return { text: n.text, children: n.children.map((c) => subtree(nodes, c)) };
+}
+// Walks up from id to the root's direct child that contains it — the "branch" a
+// node belongs to, for the colorful (multi-ink) theme. Returns null for the root itself.
+function branchAncestor(nodes, rootId, id) {
+  if (id === rootId) return null;
+  let cur = id;
+  while (nodes[cur].parent !== rootId) {
+    cur = nodes[cur].parent;
+    if (cur == null) return null;
+  }
+  return cur;
 }
 
 // Converts a CSS declaration string (as used throughout this component's
@@ -93,6 +106,11 @@ class MindMapApp extends React.Component {
     };
     this.mctx = document.createElement("canvas").getContext("2d");
     this.mcache = {};
+    // Sticky branch -> palette-slot assignments for the "multi" (カラフル) ink theme.
+    // Assigned once per branch id and never reassigned, so editing one branch never
+    // recolors an unrelated one (see branchColorOf in renderVals).
+    this._branchColors = {};
+    this._branchColorSeq = 0;
   }
 
   componentDidMount() {
@@ -611,6 +629,29 @@ class MindMapApp extends React.Component {
     const ghost = s.ghost;
     const ghostSet = ghost ? descendants(nodes, ghost.id) : [];
 
+    // "multi" (カラフル): each top-level branch gets its own ink from MULTI_PALETTE,
+    // inherited by all of that branch's descendants; the root stays neutral (paper).
+    // Outside multi mode branchColorOf always returns the single selected `ink`,
+    // so the rest of this method reads the same regardless of theme.
+    const multiMode = s.theme.ink === "multi";
+    if (multiMode) {
+      // Seed any not-yet-colored root children in their current sibling order, but
+      // never touch an existing assignment — that's what keeps a branch's color
+      // fixed while unrelated siblings are added, removed, or reordered.
+      nodes[s.rootId].children.forEach((childId) => {
+        if (this._branchColors[childId] == null) {
+          this._branchColors[childId] = this._branchColorSeq % MULTI_PALETTE.length;
+          this._branchColorSeq++;
+        }
+      });
+    }
+    const branchColorOf = (id) => {
+      if (!multiMode) return ink;
+      const b = branchAncestor(nodes, s.rootId, id);
+      if (b == null || this._branchColors[b] == null) return INK.paper;
+      return MULTI_PALETTE[this._branchColors[b]];
+    };
+
     const edges = [];
     Object.keys(pos).forEach((id) => {
       const p = nodes[id].parent;
@@ -638,7 +679,8 @@ class MindMapApp extends React.Component {
         const k = Math.abs(x2 - x1) * 0.5 * (x2 >= x1 ? 1 : -1);
         d = "M" + x1 + " " + y1 + " C" + (x1 + k) + " " + y1 + ", " + (x2 - k) + " " + y2 + ", " + x2 + " " + y2;
       }
-      edges.push({ d, stroke: b.depth === 1 ? ink.edge : "var(--color-neutral-400)", w: b.depth === 1 ? 1.8 : 1.2 });
+      const edgeColorize = multiMode || b.depth === 1;
+      edges.push({ d, stroke: edgeColorize ? branchColorOf(id).edge : "var(--color-neutral-400)", w: b.depth === 1 ? 1.8 : 1.2 });
     });
 
     const nodeViews = Object.keys(pos).map((id) => {
@@ -655,17 +697,19 @@ class MindMapApp extends React.Component {
         + "font-size:" + m.fs + "px;line-height:1.5;cursor:grab;"
         + (p.lines === 1 ? "white-space:nowrap;" : "overflow-wrap:anywhere;")
         + "font-family:'Source Serif 4','Noto Serif JP',serif;";
-      if (isRoot) box += "background:" + ink.solid + ";color:var(--color-bg);font-weight:600;border-radius:var(--radius-md);box-shadow:var(--shadow-sm);";
+      const nodeInk = branchColorOf(id);
+      const colorize = multiMode || p.depth === 1;
+      if (isRoot) box += "background:" + nodeInk.solid + ";color:var(--color-bg);font-weight:600;border-radius:var(--radius-md);box-shadow:var(--shadow-sm);";
       else if (s.theme.shape === "box") {
         box += "background:var(--color-neutral-100);border:1px solid var(--color-divider);border-radius:var(--radius-md);"
-          + "color:" + (p.depth === 1 ? ink.text : "var(--color-text)") + ";font-weight:" + (p.depth === 1 ? 600 : 400) + ";";
+          + "color:" + (colorize ? nodeInk.text : "var(--color-text)") + ";font-weight:" + (colorize ? 600 : 400) + ";";
       } else if (s.theme.shape === "underline") {
-        box += "background:transparent;border-bottom:2px solid " + (p.depth === 1 ? ink.solid : "var(--color-neutral-400)") + ";"
-          + "color:" + (p.depth === 1 ? ink.text : "var(--color-text)") + ";font-weight:" + (p.depth === 1 ? 600 : 400) + ";";
+        box += "background:transparent;border-bottom:2px solid " + (colorize ? nodeInk.solid : "var(--color-neutral-400)") + ";"
+          + "color:" + (colorize ? nodeInk.text : "var(--color-text)") + ";font-weight:" + (colorize ? 600 : 400) + ";";
       } else {
-        box += "background:transparent;color:" + (p.depth === 1 ? ink.text : "var(--color-text)") + ";font-weight:" + (p.depth === 1 ? 600 : 400) + ";";
+        box += "background:transparent;color:" + (colorize ? nodeInk.text : "var(--color-text)") + ";font-weight:" + (colorize ? 600 : 400) + ";";
       }
-      if (selected) box += "outline:2px solid " + ink.ring + ";outline-offset:3px;";
+      if (selected) box += "outline:2px solid " + nodeInk.ring + ";outline-offset:3px;";
       if (intoTarget) box += "outline:2px dashed var(--color-accent-2);outline-offset:3px;";
 
       const gx = dragging && ghost ? ghost.dx : 0;
@@ -751,8 +795,10 @@ class MindMapApp extends React.Component {
       noMenu: (e) => e.preventDefault(),
       inkPaper: s.theme.ink === "paper", inkCyan: s.theme.ink === "cyan", inkMagenta: s.theme.ink === "magenta",
       inkYellow: s.theme.ink === "yellow", inkGreen: s.theme.ink === "green", inkPurple: s.theme.ink === "purple",
+      inkMulti: s.theme.ink === "multi",
       setInkPaper: (e) => this.pick(e, () => this.setTheme("ink", "paper")), setInkCyan: (e) => this.pick(e, () => this.setTheme("ink", "cyan")), setInkMagenta: (e) => this.pick(e, () => this.setTheme("ink", "magenta")),
       setInkYellow: (e) => this.pick(e, () => this.setTheme("ink", "yellow")), setInkGreen: (e) => this.pick(e, () => this.setTheme("ink", "green")), setInkPurple: (e) => this.pick(e, () => this.setTheme("ink", "purple")),
+      setInkMulti: (e) => this.pick(e, () => this.setTheme("ink", "multi")),
       shapeBox: s.theme.shape === "box", shapeUnderline: s.theme.shape === "underline", shapeBare: s.theme.shape === "bare",
       setShapeBox: (e) => this.pick(e, () => this.setTheme("shape", "box")), setShapeUnderline: (e) => this.pick(e, () => this.setTheme("shape", "underline")), setShapeBare: (e) => this.pick(e, () => this.setTheme("shape", "bare")),
       edgeCurve: s.theme.edge === "curve", edgeOrtho: s.theme.edge === "ortho", edgeLine: s.theme.edge === "line",
@@ -859,6 +905,9 @@ class MindMapApp extends React.Component {
                         <label className="seg-opt">イエロー<input type="radio" name="mmink" checked={v.inkYellow} onChange={v.setInkYellow} style={styleObj("position:absolute;opacity:0;width:0;height:0")} /></label>
                         <label className="seg-opt">グリーン<input type="radio" name="mmink" checked={v.inkGreen} onChange={v.setInkGreen} style={styleObj("position:absolute;opacity:0;width:0;height:0")} /></label>
                         <label className="seg-opt">パープル<input type="radio" name="mmink" checked={v.inkPurple} onChange={v.setInkPurple} style={styleObj("position:absolute;opacity:0;width:0;height:0")} /></label>
+                      </div>
+                      <div className="seg">
+                        <label className="seg-opt">カラフル<input type="radio" name="mmink" checked={v.inkMulti} onChange={v.setInkMulti} style={styleObj("position:absolute;opacity:0;width:0;height:0")} /></label>
                       </div>
                     </div>
                   </div>
