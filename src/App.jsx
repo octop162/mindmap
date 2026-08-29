@@ -99,7 +99,8 @@ class MindMapApp extends React.Component {
         ink: this.props.ink || "cyan",
         shape: this.props.nodeShape || "box",
         edge: this.props.edgeShape || "curve",
-        size: this.props.textSize || "md"
+        size: this.props.textSize || "md",
+        invert: false
       },
       past: [], future: [], clip: null,
       src: "", srcDirty: false, drop: null, ghost: null, toast: ""
@@ -699,7 +700,13 @@ class MindMapApp extends React.Component {
         + "font-family:'Source Serif 4','Noto Serif JP',serif;";
       const nodeInk = branchColorOf(id);
       const colorize = multiMode || p.depth === 1;
-      if (isRoot) box += "background:" + nodeInk.solid + ";color:var(--color-bg);font-weight:600;border-radius:var(--radius-md);box-shadow:var(--shadow-sm);";
+      // Normally the root alone gets the solid filled "chip" look, ink-colored, and
+      // depth 1 just gets colored text on the regular shape. Inverting swaps which
+      // depth gets the chip: depth 1 becomes the vivid filled chip and the root
+      // becomes a fixed neutral (paper) anchor instead of taking the ink color.
+      const invert = s.theme.invert;
+      const chipInk = isRoot ? (invert ? INK.paper : nodeInk) : (invert && p.depth === 1 ? nodeInk : null);
+      if (chipInk) box += "background:" + chipInk.solid + ";color:var(--color-bg);font-weight:600;border-radius:var(--radius-md);box-shadow:var(--shadow-sm);";
       else if (s.theme.shape === "box") {
         box += "background:var(--color-neutral-100);border:1px solid var(--color-divider);border-radius:var(--radius-md);"
           + "color:" + (colorize ? nodeInk.text : "var(--color-text)") + ";font-weight:" + (colorize ? 600 : 400) + ";";
@@ -709,7 +716,8 @@ class MindMapApp extends React.Component {
       } else {
         box += "background:transparent;color:" + (colorize ? nodeInk.text : "var(--color-text)") + ";font-weight:" + (colorize ? 600 : 400) + ";";
       }
-      if (selected) box += "outline:2px solid " + nodeInk.ring + ";outline-offset:3px;";
+      const ringInk = isRoot && invert ? INK.paper : nodeInk;
+      if (selected) box += "outline:2px solid " + ringInk.ring + ";outline-offset:3px;";
       if (intoTarget) box += "outline:2px dashed var(--color-accent-2);outline-offset:3px;";
 
       const gx = dragging && ghost ? ghost.dx : 0;
@@ -796,6 +804,8 @@ class MindMapApp extends React.Component {
       inkPaper: s.theme.ink === "paper", inkCyan: s.theme.ink === "cyan", inkMagenta: s.theme.ink === "magenta",
       inkYellow: s.theme.ink === "yellow", inkGreen: s.theme.ink === "green", inkPurple: s.theme.ink === "purple",
       inkMulti: s.theme.ink === "multi",
+      invertOff: !s.theme.invert, invertOn: !!s.theme.invert,
+      setInvertOff: (e) => this.pick(e, () => this.setTheme("invert", false)), setInvertOn: (e) => this.pick(e, () => this.setTheme("invert", true)),
       setInkPaper: (e) => this.pick(e, () => this.setTheme("ink", "paper")), setInkCyan: (e) => this.pick(e, () => this.setTheme("ink", "cyan")), setInkMagenta: (e) => this.pick(e, () => this.setTheme("ink", "magenta")),
       setInkYellow: (e) => this.pick(e, () => this.setTheme("ink", "yellow")), setInkGreen: (e) => this.pick(e, () => this.setTheme("ink", "green")), setInkPurple: (e) => this.pick(e, () => this.setTheme("ink", "purple")),
       setInkMulti: (e) => this.pick(e, () => this.setTheme("ink", "multi")),
@@ -909,6 +919,13 @@ class MindMapApp extends React.Component {
                       <div className="seg">
                         <label className="seg-opt">カラフル<input type="radio" name="mmink" checked={v.inkMulti} onChange={v.setInkMulti} style={styleObj("position:absolute;opacity:0;width:0;height:0")} /></label>
                       </div>
+                    </div>
+                  </div>
+                  <div className="field">
+                    <label>1階層目の塗り</label>
+                    <div className="seg">
+                      <label className="seg-opt">通常<input type="radio" name="mminvert" checked={v.invertOff} onChange={v.setInvertOff} style={styleObj("position:absolute;opacity:0;width:0;height:0")} /></label>
+                      <label className="seg-opt">反転(中心を黒に)<input type="radio" name="mminvert" checked={v.invertOn} onChange={v.setInvertOn} style={styleObj("position:absolute;opacity:0;width:0;height:0")} /></label>
                     </div>
                   </div>
                   <div className="field">
