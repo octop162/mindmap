@@ -91,7 +91,7 @@ class MindMapApp extends React.Component {
     const seed = buildSeed(SEED);
     this.state = {
       nodes: seed.nodes, rootId: seed.rootId, seq: seed.seq,
-      sel: seed.rootId, editing: null,
+      sel: seed.rootId, selVisible: true, editing: null,
       pan: { x: 0, y: 0 }, zoom: 1,
       sidebarOpen: this.props.sidebarOpen !== false,
       sidebarWidth: 330,
@@ -360,7 +360,7 @@ class MindMapApp extends React.Component {
     };
   }
   onCanvasDown(e) {
-    if (e.button === 0 && e.target === this.canvas) this.setState({ editing: null });
+    if (e.button === 0 && e.target === this.canvas) this.setState({ editing: null, selVisible: false });
     this.drag = { kind: "pan", sx: e.clientX, sy: e.clientY, pan: this.state.pan };
     e.preventDefault();
   }
@@ -372,7 +372,7 @@ class MindMapApp extends React.Component {
     e.stopPropagation();
     if (e.button !== 0) { this.drag = { kind: "pan", sx: e.clientX, sy: e.clientY, pan: this.state.pan }; return; }
     if (this.state.editing === id) return;
-    this.setState({ sel: id, editing: null });
+    this.setState({ sel: id, editing: null, selVisible: true });
     if (id === this.state.rootId) { this.drag = null; return; }
     this.drag = { kind: "node", id, sx: e.clientX, sy: e.clientY, moved: false };
     e.preventDefault();
@@ -460,6 +460,7 @@ class MindMapApp extends React.Component {
     const t = e.target;
     if (t && (t.tagName === "TEXTAREA" || t.tagName === "INPUT")) return;
     if (this.state.editing) return;
+    if (!this.state.selVisible) this.setState({ selVisible: true });
     const meta = e.metaKey || e.ctrlKey;
     const k = e.key.toLowerCase();
     if (meta && k === "z") { e.preventDefault(); return e.shiftKey ? this.redo() : this.undo(); }
@@ -656,7 +657,7 @@ class MindMapApp extends React.Component {
     const nodeViews = Object.keys(pos).map((id) => {
       const n = nodes[id], p = pos[id];
       const isRoot = id === s.rootId;
-      const selected = s.sel === id;
+      const selected = s.sel === id && s.selVisible;
       const intoTarget = s.drop && s.drop.mode === "into" && s.drop.id === id;
       const editing = s.editing === id;
       const dragging = ghostSet.indexOf(id) >= 0;
