@@ -577,6 +577,173 @@ class MindMapApp extends React.Component {
     } catch (e) { this.toast("読み込みに失敗しました"); }
   }
 
+  /* ——— svg export ——— */
+  // Resolves a color (a literal, or "var(--x)") to a concrete rgb()/rgba() string via
+  // a hidden probe element, so color-mix()/custom-property values that only make sense
+  // inside this page's own stylesheet still render correctly in the standalone SVG file.
+  resolveColor(value) {
+    const v = String(value).trim();
+    const m = /^var\((--[\w-]+)\)$/.exec(v);
+    const raw = m ? getComputedStyle(document.documentElement).getPropertyValue(m[1]).trim() : v;
+    if (!this._colorProbe) {
+      this._colorProbe = document.createElement("div");
+      this._colorProbe.style.display = "none";
+      document.body.appendChild(this._colorProbe);
+    }
+    this._colorProbe.style.color = raw;
+    return getComputedStyle(this._colorProbe).color || raw;
+  }
+  // Greedy any-character wrap, mirroring the canvas nodes' CSS (overflow-wrap:anywhere)
+  // since SVG <text> never wraps on its own.
+  wrapLines(text, bold) {
+    const m = this.metrics();
+    this.mctx.font = (bold ? "600 " : "400 ") + m.fs + 'px "Source Serif 4","Noto Serif JP",serif';
+    const chars = Array.from(text || "");
+    if (!chars.length) return [""];
+    const lines = [];
+    let cur = "";
+    for (const ch of chars) {
+      const test = cur + ch;
+      if (cur && this.mctx.measureText(test).width > m.maxW) { lines.push(cur); cur = ch; }
+      else cur = test;
+    }
+    lines.push(cur);
+    return lines;
+  }
+  buildSvg() {
+    const s = this.state;
+    const m = this.metrics();
+    const ink = INK[s.theme.ink] || INK.cyan;
+    const pos = this.layout();
+    const nodes = s.nodes;
+    const multiMode = s.theme.ink === "multi";
+    if (multiMode) {
+      nodes[s.rootId].children.forEach((childId) => {
+        if (this._branchColors[childId] == null) {
+          this._branchColors[childId] = this._branchColorSeq % MULTI_PALETTE.length;
+          this._branchColorSeq++;
+        }
+      });
+    }
+    const branchColorOf = (id) => {
+      if (!multiMode) return ink;
+      const b = branchAncestor(nodes, s.rootId, id);
+      if (b == null || this._branchColors[b] == null) return INK.paper;
+      return MULTI_PALETTE[this._branchColors[b]];
+    };
+    const radiusPx = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--radius-md")) || 2;
+    const esc = (t) => String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+    let x1 = Infinity, y1 = Infinity, x2 = -Infinity, y2 = -Infinity;
+    Object.keys(pos).forEach((id) => {
+      const p = pos[id];
+      x1 = Math.min(x1, p.x - p.w / 2); x2 = Math.max(x2, p.x + p.w / 2);
+      y1 = Math.min(y1, p.y - p.h / 2); y2 = Math.max(y2, p.y + p.h / 2);
+    });
+    const pad = 30;
+    x1 -= pad; y1 -= pad; x2 += pad; y2 += pad;
+    const W = Math.max(1, x2 - x1), H = Math.max(1, y2 - y1);
+
+    const edgeEls = [];
+    Object.keys(pos).forEach((id) => {
+      const parent = nodes[id].parent;
+      if (!parent || !pos[parent]) return;
+      const a = pos[parent], b = pos[id];
+      const vert = b.vert;
+      let x1e, y1e, x2e, y2e;
+      if (vert) {
+        const dir = b.y >= a.y ? 1 : -1;
+        x1e = a.x; y1e = a.y + dir * a.h / 2; x2e = b.x; y2e = b.y - dir * b.h / 2;
+      } else {
+        const dir = b.x >= a.x ? 1 : -1;
+        x1e = a.x + dir * a.w / 2; y1e = a.y; x2e = b.x - dir * b.w / 2; y2e = b.y;
+      }
+      let d;
+      if (s.theme.edge === "line") d = "M" + x1e + " " + y1e + " L" + x2e + " " + y2e;
+      else if (s.theme.edge === "ortho") {
+        d = vert
+          ? "M" + x1e + " " + y1e + " V" + (y1e + y2e) / 2 + " H" + x2e + " V" + y2e
+          : "M" + x1e + " " + y1e + " H" + (x1e + x2e) / 2 + " V" + y2e + " H" + x2e;
+      } else if (vert) {
+        const k = Math.abs(y2e - y1e) * 0.5 * (y2e >= y1e ? 1 : -1);
+        d = "M" + x1e + " " + y1e + " C" + x1e + " " + (y1e + k) + ", " + x2e + " " + (y2e - k) + ", " + x2e + " " + y2e;
+      } else {
+        const k = Math.abs(x2e - x1e) * 0.5 * (x2e >= x1e ? 1 : -1);
+        d = "M" + x1e + " " + y1e + " C" + (x1e + k) + " " + y1e + ", " + (x2e - k) + " " + y2e + ", " + x2e + " " + y2e;
+      }
+      const edgeColorize = multiMode || b.depth === 1;
+      const stroke = this.resolveColor(edgeColorize ? branchColorOf(id).edge : "var(--color-neutral-400)");
+      const w = b.depth === 1 ? 1.8 : 1.2;
+      edgeEls.push('<path d="' + d + '" stroke="' + stroke + '" stroke-width="' + w + '" fill="none" stroke-linecap="round"/>');
+    });
+
+    const nodeEls = Object.keys(pos).map((id) => {
+      const n = nodes[id], p = pos[id];
+      const isRoot = id === s.rootId;
+      const nodeInk = branchColorOf(id);
+      const colorize = multiMode || p.depth === 1;
+      const invert = s.theme.invert;
+      const chipInk = isRoot ? (invert ? INK.paper : nodeInk) : (invert && p.depth === 1 ? nodeInk : null);
+      const bold = isRoot || colorize;
+
+      let fill = null, borderColor = null, underlineColor = null, textColor;
+      if (chipInk) {
+        fill = this.resolveColor(chipInk.solid);
+        textColor = this.resolveColor("var(--color-bg)");
+      } else if (s.theme.shape === "box") {
+        fill = this.resolveColor("var(--color-neutral-100)");
+        borderColor = this.resolveColor("var(--color-divider)");
+        textColor = this.resolveColor(colorize ? nodeInk.text : "var(--color-text)");
+      } else if (s.theme.shape === "underline") {
+        underlineColor = this.resolveColor(colorize ? nodeInk.solid : "var(--color-neutral-400)");
+        textColor = this.resolveColor(colorize ? nodeInk.text : "var(--color-text)");
+      } else {
+        textColor = this.resolveColor(colorize ? nodeInk.text : "var(--color-text)");
+      }
+
+      const lines = this.wrapLines(n.text, bold);
+      const lh = Math.round(m.fs * 1.5);
+      const startY = p.y - (lines.length * lh) / 2 + lh / 2 + m.fs * 0.35;
+
+      const parts = [];
+      if (fill) {
+        parts.push('<rect x="' + (p.x - p.w / 2) + '" y="' + (p.y - p.h / 2) + '" width="' + p.w + '" height="' + p.h + '" rx="' + radiusPx + '" fill="' + fill + '"'
+          + (borderColor ? ' stroke="' + borderColor + '" stroke-width="1"' : '') + '/>');
+      }
+      if (underlineColor) {
+        const ly = p.y + p.h / 2 - 1;
+        parts.push('<line x1="' + (p.x - p.w / 2 + m.padX) + '" y1="' + ly + '" x2="' + (p.x + p.w / 2 - m.padX) + '" y2="' + ly + '" stroke="' + underlineColor + '" stroke-width="2"/>');
+      }
+      const tspans = lines.map((ln, i) => '<tspan x="' + p.x + '" y="' + (startY + i * lh) + '">' + esc(ln) + '</tspan>').join("");
+      parts.push('<text text-anchor="middle" font-family="Source Serif 4, Noto Serif JP, serif" font-size="' + m.fs + '" font-weight="' + (bold ? 600 : 400) + '" fill="' + textColor + '">' + tspans + '</text>');
+      return parts.join("");
+    });
+
+    const bg = this.resolveColor("var(--color-bg)");
+    return '<?xml version="1.0" encoding="UTF-8"?>\n'
+      + '<svg xmlns="http://www.w3.org/2000/svg" viewBox="' + x1 + ' ' + y1 + ' ' + W + ' ' + H + '" width="' + Math.round(W) + '" height="' + Math.round(H) + '">'
+      + '<rect x="' + x1 + '" y="' + y1 + '" width="' + W + '" height="' + H + '" fill="' + bg + '"/>'
+      + edgeEls.join("")
+      + nodeEls.join("")
+      + '</svg>';
+  }
+  saveSvg() {
+    try {
+      const svg = this.buildSvg();
+      const blob = new Blob([svg], { type: "image/svg+xml" });
+      const url = URL.createObjectURL(blob);
+      const name = ((this.state.nodes[this.state.rootId].text || "").trim() || "mindmap").replace(/[\\/:*?"<>|]/g, "_");
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = name + ".svg";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      this.toast("SVGを保存しました");
+    } catch (e) { console.error(e); this.toast("SVGの保存に失敗しました"); }
+  }
+
   toast(msg) {
     this.setState({ toast: msg });
     clearTimeout(this._toastT);
@@ -764,7 +931,7 @@ class MindMapApp extends React.Component {
       cut: () => this.cut(), copy: () => this.copy(), paste: () => this.paste(),
       removeSel: () => this.removeSel(),
       moveUp: () => this.reorder(-1), moveDown: () => this.reorder(1),
-      copyMermaid: () => this.copyMermaid(), saveLocal: () => this.saveLocal(), loadLocal: () => this.loadLocal(),
+      copyMermaid: () => this.copyMermaid(), saveLocal: () => this.saveLocal(), loadLocal: () => this.loadLocal(), saveSvg: () => this.saveSvg(),
       zoomIn: () => this.setZoom(s.zoom * 1.2), zoomOut: () => this.setZoom(s.zoom / 1.2), fit: () => this.fit(),
       zoomLabel: Math.round(s.zoom * 100) + "%",
       onCanvasDown: (e) => this.onCanvasDown(e),
@@ -814,6 +981,7 @@ class MindMapApp extends React.Component {
 
           <div style={styleObj("display:flex;align-items:center;gap:6px")}>
             <button className="btn btn-secondary" style={styleObj("height:36px")} title="mermaidをクリップボードにコピー" onClick={v.copyMermaid}><i className="ph-duotone ph-clipboard" style={styleObj("font-size:16px")}></i><span className="mm-lbl">mermaidをコピー</span></button>
+            <button className="btn btn-secondary" style={styleObj("height:36px")} title="SVGとして保存" onClick={v.saveSvg}><i className="ph-duotone ph-image" style={styleObj("font-size:16px")}></i><span className="mm-lbl">SVGで保存</span></button>
             <button className="btn btn-secondary" style={styleObj("height:36px")} title="localStorageに保存" onClick={v.saveLocal}><i className="ph-duotone ph-floppy-disk" style={styleObj("font-size:16px")}></i><span className="mm-lbl">保存</span></button>
             <button className="btn btn-secondary" style={styleObj("height:36px")} title="localStorageから読み込み" onClick={v.loadLocal}><i className="ph-duotone ph-folder-open" style={styleObj("font-size:16px")}></i><span className="mm-lbl">読み込み</span></button>
           </div>
