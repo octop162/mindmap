@@ -28,6 +28,8 @@ const DIRS = {
   "both-v": { axis: "v", both: true }, down: { axis: "v", both: false }
 };
 const STORE = "mm-doc-v1";
+const SIDEBAR_MIN = 220;
+const SIDEBAR_MAX = 640;
 
 function buildSeed(seed) {
   const nodes = {}; let seq = 1;
@@ -92,8 +94,8 @@ class MindMapApp extends React.Component {
       sel: seed.rootId, editing: null,
       pan: { x: 0, y: 0 }, zoom: 1,
       sidebarOpen: this.props.sidebarOpen !== false,
+      sidebarWidth: 330,
       panel: "src",
-      dialect: this.props.dialect || "mindmap",
       dir: this.props.direction || "both-h",
       theme: {
         ink: this.props.ink || "cyan",
@@ -362,6 +364,10 @@ class MindMapApp extends React.Component {
     this.drag = { kind: "pan", sx: e.clientX, sy: e.clientY, pan: this.state.pan };
     e.preventDefault();
   }
+  onSidebarResizeDown(e) {
+    this.sidebarResize = { sx: e.clientX, w: this.state.sidebarWidth };
+    e.preventDefault();
+  }
   onNodeDown(id, e) {
     e.stopPropagation();
     if (e.button !== 0) { this.drag = { kind: "pan", sx: e.clientX, sy: e.clientY, pan: this.state.pan }; return; }
@@ -372,6 +378,11 @@ class MindMapApp extends React.Component {
     e.preventDefault();
   }
   onMove(e) {
+    const r = this.sidebarResize;
+    if (r) {
+      const w = Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, r.w + (e.clientX - r.sx)));
+      return this.setState({ sidebarWidth: w });
+    }
     const d = this.drag;
     if (!d) return;
     const dx = e.clientX - d.sx, dy = e.clientY - d.sy;
@@ -396,6 +407,7 @@ class MindMapApp extends React.Component {
     this.setState({ ghost: { id: d.id, dx: dx / z, dy: dy / z }, drop });
   }
   onUp() {
+    if (this.sidebarResize) { this.sidebarResize = null; return; }
     const d = this.drag; this.drag = null;
     if (!d || d.kind !== "node" || !d.moved) return this.setState({ ghost: null, drop: null });
     const drop = this.state.drop;
@@ -472,25 +484,14 @@ class MindMapApp extends React.Component {
 
   /* ——— mermaid ——— */
   toMermaid() {
-    const { nodes, rootId, dialect } = this.state;
-    const lines = [];
-    if (dialect === "flowchart") {
-      lines.push("flowchart LR");
-      const num = {}; let i = 0;
-      const label = (id) => { if (!num[id]) num[id] = "N" + (++i); return num[id] + '["' + (nodes[id].text || " ").replace(/"/g, "'") + '"]'; };
-      label(rootId);
-      if (!nodes[rootId].children.length) lines.push("  " + label(rootId));
-      const walk = (id) => nodes[id].children.forEach((k) => { lines.push("  " + label(id) + " --> " + label(k)); walk(k); });
-      walk(rootId);
-    } else {
-      lines.push("mindmap");
-      const walk = (id, depth) => {
-        const txt = nodes[id].text || " ";
-        lines.push("  ".repeat(depth + 1) + (depth === 0 ? "root((" + txt + "))" : txt));
-        nodes[id].children.forEach((k) => walk(k, depth + 1));
-      };
-      walk(rootId, 0);
-    }
+    const { nodes, rootId } = this.state;
+    const lines = ["mindmap"];
+    const walk = (id, depth) => {
+      const txt = nodes[id].text || " ";
+      lines.push("  ".repeat(depth + 1) + (depth === 0 ? "root((" + txt + "))" : txt));
+      nodes[id].children.forEach((k) => walk(k, depth + 1));
+    };
+    walk(rootId, 0);
     return lines.join("\n");
   }
 
@@ -505,55 +506,23 @@ class MindMapApp extends React.Component {
     };
     const clean = (s) => s.trim()
       .replace(/^root\s*\(\(([\s\S]*)\)\)$/, "$1")
-      .replace(/^\w[\w-]*\s*\(\(([\s\S]*)\)\)$/, "$1")
-      .replace(/^\w[\w-]*\s*\[\s*"?([\s\S]*?)"?\s*\]$/, "$1")
       .replace(/^\(\(([\s\S]*)\)\)$/, "$1")
-      .replace(/^\[([\s\S]*)\]$/, "$1")
-      .replace(/^\(([\s\S]*)\)$/, "$1")
       .trim();
 
     let rootId = null;
-    const isFlow = /-->/.test(text) || /^\s*(flowchart|graph)\b/m.test(text);
-    if (isFlow) {
-      const byKey = {};
-      const parse = (tok) => {
-        const t = tok.trim();
-        const key = (t.match(/^[\w-]+/) || [t])[0];
-        return { key, text: clean(t) === key ? key : clean(t) };
-      };
-      body.forEach((l) => {
-        if (/^\s*(flowchart|graph)\b/.test(l) || !l.trim()) return;
-        const parts = l.split(/-->|---|-\.->/);
-        if (parts.length < 2) return;
-        for (let i = 0; i < parts.length - 1; i++) {
-          const a = parse(parts[i].replace(/\|[^|]*\|\s*$/, "")), b = parse(parts[i + 1]);
-          if (!byKey[a.key]) { byKey[a.key] = mk(a.text, null); if (!rootId) rootId = byKey[a.key]; }
-          else if (a.text !== a.key) nodes[byKey[a.key]].text = a.text;
-          if (!byKey[b.key]) byKey[b.key] = mk(b.text, byKey[a.key]);
-          else if (!nodes[byKey[b.key]].parent && byKey[b.key] !== rootId) {
-            nodes[byKey[b.key]].parent = byKey[a.key];
-            nodes[byKey[a.key]].children.push(byKey[b.key]);
-          }
-        }
-      });
-      Object.keys(nodes).forEach((id) => {
-        if (id !== rootId && !nodes[id].parent) { nodes[id].parent = rootId; nodes[rootId].children.push(id); }
-      });
-    } else {
-      const stack = [];
-      body.forEach((l) => {
-        if (!l.trim() || /^\s*mindmap\s*$/.test(l)) return;
-        const indent = l.match(/^\s*/)[0].replace(/\t/g, "  ").length;
-        const txt = clean(l);
-        if (!txt) return;
-        while (stack.length && stack[stack.length - 1].indent >= indent) stack.pop();
-        const parent = stack.length ? stack[stack.length - 1].id : null;
-        const id = mk(txt, parent);
-        if (!rootId) rootId = id;
-        else if (!parent) { nodes[id].parent = rootId; nodes[rootId].children.push(id); }
-        stack.push({ indent, id });
-      });
-    }
+    const stack = [];
+    body.forEach((l) => {
+      if (!l.trim() || /^\s*mindmap\s*$/.test(l)) return;
+      const indent = l.match(/^\s*/)[0].replace(/\t/g, "  ").length;
+      const txt = clean(l);
+      if (!txt) return;
+      while (stack.length && stack[stack.length - 1].indent >= indent) stack.pop();
+      const parent = stack.length ? stack[stack.length - 1].id : null;
+      const id = mk(txt, parent);
+      if (!rootId) rootId = id;
+      else if (!parent) { nodes[id].parent = rootId; nodes[rootId].children.push(id); }
+      stack.push({ indent, id });
+    });
     if (!rootId) return null;
     return { nodes, rootId, seq };
   }
@@ -585,7 +554,7 @@ class MindMapApp extends React.Component {
     try {
       localStorage.setItem(STORE, JSON.stringify({
         nodes: this.state.nodes, rootId: this.state.rootId, seq: this.state.seq,
-        theme: this.state.theme, dialect: this.state.dialect, dir: this.state.dir
+        theme: this.state.theme, dir: this.state.dir
       }));
       this.toast("localStorageに保存しました");
     } catch (e) { this.toast("保存できませんでした"); }
@@ -599,7 +568,7 @@ class MindMapApp extends React.Component {
       const snap = this.snapshot();
       this.setState((s) => ({
         nodes: d.nodes, rootId: d.rootId, seq: d.seq || 999, sel: d.rootId, editing: null,
-        theme: d.theme || s.theme, dialect: d.dialect || s.dialect, dir: d.dir || s.dir,
+        theme: d.theme || s.theme, dir: d.dir || s.dir,
         srcDirty: false, past: s.past.concat(snap).slice(-80), future: []
       }));
       setTimeout(() => this.fit(), 40);
@@ -778,6 +747,8 @@ class MindMapApp extends React.Component {
       canvasRef: (el) => { this.canvas = el; },
       sidebarOpen: s.sidebarOpen,
       toggleSidebar: () => this.setState((st) => ({ sidebarOpen: !st.sidebarOpen })),
+      sidebarWidth: s.sidebarWidth,
+      onSidebarResizeDown: (e) => this.onSidebarResizeDown(e),
       panelSrc: s.panel === "src", panelTheme: s.panel === "theme",
       showSrc: (e) => this.pick(e, () => this.setState({ panel: "src" })),
       showTheme: (e) => this.pick(e, () => this.setState({ panel: "theme" })),
@@ -785,9 +756,6 @@ class MindMapApp extends React.Component {
       onSrcInput: (e) => this.setState({ src: e.target.value, srcDirty: true }),
       onSrcKey: (e) => { if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); this.applySrc(); } },
       applySrc: () => this.applySrc(),
-      dialectMindmap: s.dialect === "mindmap", dialectFlow: s.dialect === "flowchart",
-      setMindmap: (e) => this.pick(e, () => this.setState({ dialect: "mindmap", srcDirty: false })),
-      setFlow: (e) => this.pick(e, () => this.setState({ dialect: "flowchart", srcDirty: false })),
       dirBothH: s.dir === "both-h", dirRight: s.dir === "right", dirBothV: s.dir === "both-v", dirDown: s.dir === "down",
       setDirBothH: (e) => this.pick(e, () => this.setDir("both-h")), setDirRight: (e) => this.pick(e, () => this.setDir("right")),
       setDirBothV: (e) => this.pick(e, () => this.setDir("both-v")), setDirDown: (e) => this.pick(e, () => this.setDir("down")),
@@ -860,7 +828,8 @@ class MindMapApp extends React.Component {
         <div style={styleObj("display:flex;flex:1;min-height:0")}>
 
           {v.sidebarOpen && (
-            <div style={styleObj("width:330px;flex:0 0 330px;display:flex;flex-direction:column;gap:14px;padding:4px 20px 18px 18px;min-height:0")}>
+            <>
+            <div style={styleObj("width:" + v.sidebarWidth + "px;flex:0 0 " + v.sidebarWidth + "px;display:flex;flex-direction:column;gap:14px;padding:4px 20px 18px 18px;min-height:0")}>
               <div className="seg" role="radiogroup" style={styleObj("align-self:flex-start")}>
                 <label className="seg-opt">ソース
                   <input type="radio" name="mmpanel" checked={v.panelSrc} onChange={v.showSrc} style={styleObj("position:absolute;opacity:0;width:0;height:0")} />
@@ -872,14 +841,6 @@ class MindMapApp extends React.Component {
 
               {v.panelSrc && (
                 <div style={styleObj("display:flex;flex-direction:column;gap:10px;flex:1;min-height:0")}>
-                  <div className="seg" style={styleObj("align-self:flex-start")}>
-                    <label className="seg-opt">mindmap
-                      <input type="radio" name="mmdialect" checked={v.dialectMindmap} onChange={v.setMindmap} style={styleObj("position:absolute;opacity:0;width:0;height:0")} />
-                    </label>
-                    <label className="seg-opt">flowchart
-                      <input type="radio" name="mmdialect" checked={v.dialectFlow} onChange={v.setFlow} style={styleObj("position:absolute;opacity:0;width:0;height:0")} />
-                    </label>
-                  </div>
                   <textarea className="input mm-src" spellCheck={false} value={v.src} onChange={v.onSrcInput} onKeyDown={v.onSrcKey} style={styleObj("flex:1;min-height:0;resize:none")} />
                   <div style={styleObj("display:flex;align-items:center;gap:10px")}>
                     <button className="btn btn-primary" style={styleObj("height:36px")} onClick={v.applySrc}>反映</button>
@@ -956,6 +917,8 @@ class MindMapApp extends React.Component {
                 </div>
               )}
             </div>
+            <div className="mm-sidebar-handle" title="サイドバーの幅を調整" onMouseDown={v.onSidebarResizeDown} style={styleObj("flex:0 0 6px;width:6px;cursor:col-resize")} />
+            </>
           )}
 
           <div ref={v.canvasRef} tabIndex={-1} onMouseDown={v.onCanvasDown} onContextMenu={v.noMenu} onDoubleClick={v.onCanvasDouble} style={styleObj("position:relative;flex:1;min-width:0;overflow:hidden;background-image:radial-gradient(var(--color-neutral-300) 1px, transparent 1px);background-size:26px 26px;background-position:center;cursor:default;outline:none")}>
