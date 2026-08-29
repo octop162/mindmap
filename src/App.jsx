@@ -102,7 +102,8 @@ class MindMapApp extends React.Component {
         shape: this.props.nodeShape || "box",
         edge: this.props.edgeShape || "curve",
         size: this.props.textSize || "md",
-        invert: false
+        invert: false,
+        svgTransparentBg: false
       },
       past: [], future: [], clip: null,
       src: "", srcDirty: false, drop: null, ghost: null, toast: ""
@@ -719,10 +720,11 @@ class MindMapApp extends React.Component {
       return parts.join("");
     });
 
-    const bg = this.resolveColor("var(--color-bg)");
+    const bgRect = s.theme.svgTransparentBg ? "" :
+      '<rect x="' + x1 + '" y="' + y1 + '" width="' + W + '" height="' + H + '" fill="' + this.resolveColor("var(--color-bg)") + '"/>';
     return '<?xml version="1.0" encoding="UTF-8"?>\n'
       + '<svg xmlns="http://www.w3.org/2000/svg" viewBox="' + x1 + ' ' + y1 + ' ' + W + ' ' + H + '" width="' + Math.round(W) + '" height="' + Math.round(H) + '">'
-      + '<rect x="' + x1 + '" y="' + y1 + '" width="' + W + '" height="' + H + '" fill="' + bg + '"/>'
+      + bgRect
       + edgeEls.join("")
       + nodeEls.join("")
       + '</svg>';
@@ -942,6 +944,8 @@ class MindMapApp extends React.Component {
       inkMulti: s.theme.ink === "multi",
       invertOff: !s.theme.invert, invertOn: !!s.theme.invert,
       setInvertOff: (e) => this.pick(e, () => this.setTheme("invert", false)), setInvertOn: (e) => this.pick(e, () => this.setTheme("invert", true)),
+      svgBgPaper: !s.theme.svgTransparentBg, svgBgTransparent: !!s.theme.svgTransparentBg,
+      setSvgBgPaper: (e) => this.pick(e, () => this.setTheme("svgTransparentBg", false)), setSvgBgTransparent: (e) => this.pick(e, () => this.setTheme("svgTransparentBg", true)),
       setInkPaper: (e) => this.pick(e, () => this.setTheme("ink", "paper")), setInkCyan: (e) => this.pick(e, () => this.setTheme("ink", "cyan")), setInkMagenta: (e) => this.pick(e, () => this.setTheme("ink", "magenta")),
       setInkYellow: (e) => this.pick(e, () => this.setTheme("ink", "yellow")), setInkGreen: (e) => this.pick(e, () => this.setTheme("ink", "green")), setInkPurple: (e) => this.pick(e, () => this.setTheme("ink", "purple")),
       setInkMulti: (e) => this.pick(e, () => this.setTheme("ink", "multi")),
@@ -1056,6 +1060,13 @@ class MindMapApp extends React.Component {
                     <div className="seg">
                       <label className="seg-opt">通常<input type="radio" name="mminvert" checked={v.invertOff} onChange={v.setInvertOff} style={styleObj("position:absolute;opacity:0;width:0;height:0")} /></label>
                       <label className="seg-opt">反転(中心を黒に)<input type="radio" name="mminvert" checked={v.invertOn} onChange={v.setInvertOn} style={styleObj("position:absolute;opacity:0;width:0;height:0")} /></label>
+                    </div>
+                  </div>
+                  <div className="field">
+                    <label>SVG背景</label>
+                    <div className="seg">
+                      <label className="seg-opt">紙<input type="radio" name="mmsvgbg" checked={v.svgBgPaper} onChange={v.setSvgBgPaper} style={styleObj("position:absolute;opacity:0;width:0;height:0")} /></label>
+                      <label className="seg-opt">透明<input type="radio" name="mmsvgbg" checked={v.svgBgTransparent} onChange={v.setSvgBgTransparent} style={styleObj("position:absolute;opacity:0;width:0;height:0")} /></label>
                     </div>
                   </div>
                   <div className="field">
