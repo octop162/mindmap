@@ -139,7 +139,7 @@ class MindMapApp extends React.Component {
         svgTransparentBg: savedTheme.svgTransparentBg !== undefined ? savedTheme.svgTransparentBg : true
       },
       past: [], future: [], clip: null,
-      src: "", srcDirty: false, drop: null, ghost: null, toast: ""
+      src: "", srcDirty: false, drop: null, ghost: null, toast: "", dragOverFile: false
     };
     this.mctx = document.createElement("canvas").getContext("2d");
     this.mcache = {};
@@ -165,12 +165,21 @@ class MindMapApp extends React.Component {
     if (this._restoredFromAutosave) this.toast("自動保存から復元しました");
     this._beforeUnload = () => this.autosave();
     window.addEventListener("beforeunload", this._beforeUnload);
+    // A drop that misses the canvas (or isn't a Files drag at all) would otherwise
+    // fall through to the browser's default "navigate to this file" behavior and
+    // blow away the whole app. Swallow it at the window level as a backstop.
+    this._winDragOver = (e) => e.preventDefault();
+    this._winDrop = (e) => e.preventDefault();
+    window.addEventListener("dragover", this._winDragOver);
+    window.addEventListener("drop", this._winDrop);
   }
   componentWillUnmount() {
     window.removeEventListener("keydown", this._key);
     window.removeEventListener("mousemove", this._move);
     window.removeEventListener("mouseup", this._up);
     window.removeEventListener("beforeunload", this._beforeUnload);
+    window.removeEventListener("dragover", this._winDragOver);
+    window.removeEventListener("drop", this._winDrop);
     if (this.canvas && this._wheel) this.canvas.removeEventListener("wheel", this._wheel);
     clearTimeout(this._autosaveT);
     this.autosave();
@@ -874,12 +883,87 @@ class MindMapApp extends React.Component {
 
     const bgRect = s.theme.svgTransparentBg ? "" :
       '<rect x="' + x1 + '" y="' + y1 + '" width="' + W + '" height="' + H + '" fill="' + this.resolveColor("var(--color-bg)") + '"/>';
+    // Round-trip data: the same mindmap dialect toMermaid()/fromMermaid() already
+    // speak, embedded in a <metadata> element so viewers ignore it but a dropped
+    // .mindmap.svg (see onCanvasDrop/loadSvgFile) can rebuild the node tree exactly.
+    // "]]>" can't appear inside a CDATA section, so any occurrence in the source
+    // (a node could legitimately contain it) is split across two adjacent sections.
+    const mermaidCdata = this.toMermaid().split("]]>").join("]]]]><![CDATA[>");
+    const metadata = '<metadata id="mindmap-mermaid"><![CDATA[' + mermaidCdata + ']]></metadata>';
+    // Theme/direction round-trip alongside the tree — same {theme, dir} shape saveLocal()
+    // bundles into STORE. JSON never contains a literal "]]>" (theme values are all plain
+    // enums/booleans) so it doesn't need the mermaid block's CDATA-splitting.
+    const themeJson = JSON.stringify({ theme: s.theme, dir: s.dir });
+    const themeMetadata = '<metadata id="mindmap-theme"><![CDATA[' + themeJson + ']]></metadata>';
     return '<?xml version="1.0" encoding="UTF-8"?>\n'
       + '<svg xmlns="http://www.w3.org/2000/svg" viewBox="' + x1 + ' ' + y1 + ' ' + W + ' ' + H + '" width="' + Math.round(W) + '" height="' + Math.round(H) + '">'
+      + metadata
+      + themeMetadata
       + bgRect
       + edgeEls.join("")
       + nodeEls.join("")
       + '</svg>';
+  }
+  // Reverses buildSvg()'s <metadata id="mindmap-mermaid"> embedding. Returns null for
+  // an SVG that never went through buildSvg() (no embedded data to recover).
+  extractMermaidFromSvg(text) {
+    const m = text.match(/<metadata[^>]*\bid=["']mindmap-mermaid["'][^>]*>([\s\S]*?)<\/metadata>/);
+    if (!m) return null;
+    const cdata = m[1].match(/^\s*<!\[CDATA\[([\s\S]*)\]\]>\s*$/);
+    const raw = cdata ? cdata[1] : m[1];
+    return raw.split("]]]]><![CDATA[>").join("]]>");
+  }
+  // Reverses the <metadata id="mindmap-theme"> embedding. Returns null when absent
+  // or unparseable (an older export, or a hand-edited/corrupt file) — the caller
+  // falls back to keeping the current theme rather than failing the whole load.
+  extractThemeFromSvg(text) {
+    const m = text.match(/<metadata[^>]*\bid=["']mindmap-theme["'][^>]*>([\s\S]*?)<\/metadata>/);
+    if (!m) return null;
+    const cdata = m[1].match(/^\s*<!\[CDATA\[([\s\S]*)\]\]>\s*$/);
+    try { return JSON.parse(cdata ? cdata[1] : m[1]); } catch (e) { return null; }
+  }
+  loadSvgFile(file) {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const text = String(reader.result || "");
+      const mermaidText = this.extractMermaidFromSvg(text);
+      if (!mermaidText) return this.toast("このSVGにはマインドマップのデータが見つかりません");
+      const parsed = this.fromMermaid(mermaidText);
+      if (!parsed) return this.toast("読み込みに失敗しました");
+      const themeData = this.extractThemeFromSvg(text);
+      const snap = this.snapshot();
+      this.setState((s) => ({
+        nodes: parsed.nodes, rootId: parsed.rootId, seq: parsed.seq, sel: parsed.rootId, editing: null,
+        theme: (themeData && themeData.theme) ? Object.assign({}, s.theme, themeData.theme) : s.theme,
+        dir: (themeData && themeData.dir) || s.dir,
+        srcDirty: false, past: s.past.concat(snap).slice(-80), future: []
+      }));
+      setTimeout(() => this.fit(), 40);
+      this.toast("SVGから読み込みました");
+    };
+    reader.onerror = () => this.toast("読み込みに失敗しました");
+    reader.readAsText(file);
+  }
+  // Files dragged onto the canvas: highlight while a file (not an internal node
+  // drag, which never sets dataTransfer's Files type) hovers, load on drop.
+  onCanvasDragOver(e) {
+    const types = e.dataTransfer && e.dataTransfer.types;
+    if (!types || Array.prototype.indexOf.call(types, "Files") < 0) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+    if (!this.state.dragOverFile) this.setState({ dragOverFile: true });
+  }
+  onCanvasDragLeave(e) {
+    if (e.currentTarget.contains(e.relatedTarget)) return;
+    if (this.state.dragOverFile) this.setState({ dragOverFile: false });
+  }
+  onCanvasDrop(e) {
+    e.preventDefault();
+    this.setState({ dragOverFile: false });
+    const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    if (!file) return;
+    if (!/\.svg$/i.test(file.name)) return this.toast("SVGファイルをドロップしてください");
+    this.loadSvgFile(file);
   }
   saveSvg() {
     try {
@@ -889,7 +973,7 @@ class MindMapApp extends React.Component {
       const name = ((this.state.nodes[this.state.rootId].text || "").trim() || "mindmap").replace(/[\\/:*?"<>|]/g, "_");
       const a = document.createElement("a");
       a.href = url;
-      a.download = name + ".svg";
+      a.download = name + ".mindmap.svg";
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -1110,6 +1194,10 @@ class MindMapApp extends React.Component {
       onCanvasDown: (e) => this.onCanvasDown(e),
       onCanvasDouble: (e) => { if (e.target === this.canvas) this.fit(); },
       noMenu: (e) => e.preventDefault(),
+      dragOverFile: s.dragOverFile,
+      onCanvasDragOver: (e) => this.onCanvasDragOver(e),
+      onCanvasDragLeave: (e) => this.onCanvasDragLeave(e),
+      onCanvasDrop: (e) => this.onCanvasDrop(e),
       inkPaper: s.theme.ink === "paper", inkCyan: s.theme.ink === "cyan", inkMagenta: s.theme.ink === "magenta",
       inkYellow: s.theme.ink === "yellow", inkGreen: s.theme.ink === "green", inkPurple: s.theme.ink === "purple",
       inkMulti: s.theme.ink === "multi",
@@ -1272,7 +1360,10 @@ class MindMapApp extends React.Component {
             </>
           )}
 
-          <div ref={v.canvasRef} tabIndex={-1} onMouseDown={v.onCanvasDown} onContextMenu={v.noMenu} onDoubleClick={v.onCanvasDouble} style={styleObj("position:relative;flex:1;min-width:0;overflow:hidden;background-image:radial-gradient(var(--color-neutral-300) 1px, transparent 1px);background-size:26px 26px;background-position:center;cursor:default;outline:none")}>
+          <div ref={v.canvasRef} tabIndex={-1} onMouseDown={v.onCanvasDown} onContextMenu={v.noMenu} onDoubleClick={v.onCanvasDouble}
+            onDragOver={v.onCanvasDragOver} onDragLeave={v.onCanvasDragLeave} onDrop={v.onCanvasDrop}
+            style={styleObj("position:relative;flex:1;min-width:0;overflow:hidden;background-image:radial-gradient(var(--color-neutral-300) 1px, transparent 1px);background-size:26px 26px;background-position:center;cursor:default;outline:none"
+              + (v.dragOverFile ? ";outline:3px dashed var(--color-accent);outline-offset:-3px;" : ""))}>
             <div style={styleObj(v.viewStyle)}>
               <svg width="1" height="1" style={styleObj("position:absolute;left:0;top:0;overflow:visible;pointer-events:none")}>
                 {v.edges.map((e, i) => (
