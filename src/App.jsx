@@ -665,6 +665,7 @@ class MindMapApp extends React.Component {
     if (meta && k === "x") { e.preventDefault(); this.cut(); return true; }
     if (meta && k === "v") { e.preventDefault(); this.paste(); return true; }
     if (meta && k === "a") { e.preventDefault(); this.selectAll(); return true; }
+    if (meta && e.shiftKey && k === "h") { e.preventDefault(); this.fit(); return true; }
     if (e.altKey && (e.key === "ArrowUp" || e.key === "ArrowLeft")) { e.preventDefault(); this.reorder(-1); return true; }
     if (e.altKey && (e.key === "ArrowDown" || e.key === "ArrowRight")) { e.preventDefault(); this.reorder(1); return true; }
     if (e.key === "Enter") { e.preventDefault(); this.addSibling(); return true; }
@@ -1360,7 +1361,7 @@ class MindMapApp extends React.Component {
             <button className="btn btn-secondary btn-icon" title="縮小" onClick={v.zoomOut}><i className="ph-duotone ph-minus" style={styleObj("font-size:16px")}></i></button>
             <div style={styleObj("min-width:52px;text-align:center;font-size:13px;font-variant-numeric:tabular-nums;color:var(--color-neutral-700)")}>{v.zoomLabel}</div>
             <button className="btn btn-secondary btn-icon" title="拡大" onClick={v.zoomIn}><i className="ph-duotone ph-plus" style={styleObj("font-size:16px")}></i></button>
-            <button className="btn btn-secondary" style={styleObj("height:36px")} title="全体表示" onClick={v.fit}><i className="ph-duotone ph-frame-corners" style={styleObj("font-size:16px")}></i><span className="mm-lbl">全体表示</span></button>
+            <button className="btn btn-secondary" style={styleObj("height:36px")} title="全体表示 (⌘⇧H)" onClick={v.fit}><i className="ph-duotone ph-frame-corners" style={styleObj("font-size:16px")}></i><span className="mm-lbl">全体表示</span></button>
           </div>
         </div>
 
@@ -1494,7 +1495,7 @@ class MindMapApp extends React.Component {
             </div>
 
             <div className="mm-hints" style={styleObj("position:absolute;left:0;right:0;bottom:0;display:flex;flex-wrap:wrap;align-items:center;gap:6px 14px;padding:10px 16px;font-size:12px;color:var(--color-neutral-700);pointer-events:none")}>
-              <span>Enter 兄弟</span><span>Tab 子</span><span>↑↓←→ 移動</span><span>⌥↑↓ 並べ替え</span><span>F2 編集</span><span>⌫ 削除</span><span>⌘S 保存</span><span>⌘クリック 複数選択</span><span>⌘A 全選択</span><span>ドラッグ 並べ替え・付け替え</span><span>右ドラッグ 画面移動</span><span>ホイール ズーム</span>
+              <span>Enter 兄弟</span><span>Tab 子</span><span>↑↓←→ 移動</span><span>⌥↑↓ 並べ替え</span><span>F2 編集</span><span>⌫ 削除</span><span>⌘S 保存</span><span>⌘クリック 複数選択</span><span>⌘A 全選択</span><span>⌘⇧H 全体表示</span><span>ドラッグ 並べ替え・付け替え</span><span>右ドラッグ 画面移動</span><span>ホイール ズーム</span>
               {v.hasToast && <span className="tag tag-accent" style={styleObj("margin-left:auto")}>{v.toast}</span>}
             </div>
           </div>
