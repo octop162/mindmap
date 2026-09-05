@@ -124,7 +124,7 @@ class MindMapApp extends React.Component {
       nodes: autosave ? autosave.nodes : seed.nodes,
       rootId: autosave ? autosave.rootId : seed.rootId,
       seq: autosave ? (autosave.seq || 999) : seed.seq,
-      sel: autosave ? autosave.rootId : seed.rootId, selVisible: true, editing: null,
+      sel: autosave ? autosave.rootId : seed.rootId, multiSel: [], selVisible: true, editing: null,
       pan: { x: 0, y: 0 }, zoom: 1,
       sidebarOpen: saved.sidebarOpen != null ? saved.sidebarOpen : this.props.sidebarOpen !== false,
       sidebarWidth: saved.sidebarWidth || 330,
@@ -319,16 +319,80 @@ class MindMapApp extends React.Component {
     const s = this.state;
     if (!s.past.length) return this.toast("履歴がありません");
     const prev = JSON.parse(s.past[s.past.length - 1]);
-    this.setState({ nodes: prev.nodes, rootId: prev.rootId, sel: prev.sel, past: s.past.slice(0, -1), future: s.future.concat(this.snapshot()), editing: null, srcDirty: false });
+    this.setState({ nodes: prev.nodes, rootId: prev.rootId, sel: prev.sel, multiSel: [], past: s.past.slice(0, -1), future: s.future.concat(this.snapshot()), editing: null, srcDirty: false });
   }
   redo() {
     const s = this.state;
     if (!s.future.length) return this.toast("やり直せる操作がありません");
     const next = JSON.parse(s.future[s.future.length - 1]);
-    this.setState({ nodes: next.nodes, rootId: next.rootId, sel: next.sel, future: s.future.slice(0, -1), past: s.past.concat(this.snapshot()), editing: null, srcDirty: false });
+    this.setState({ nodes: next.nodes, rootId: next.rootId, sel: next.sel, multiSel: [], future: s.future.slice(0, -1), past: s.past.concat(this.snapshot()), editing: null, srcDirty: false });
   }
 
   newId() { const id = "n" + this.state.seq; this.setState((s) => ({ seq: s.seq + 1 })); return id; }
+
+  /* ——— selection ——— */
+  // Any plain (non-multi) selection change goes through this so multiSel never
+  // lingers stale — e.g. selecting a fresh node, editing, or rebuilding the tree
+  // from mermaid/localStorage/an SVG all mean "forget the old multi-selection."
+  selectOnly(id) { this.setState({ sel: id, multiSel: [] }); }
+  // The full current selection as an array, anchor (`sel`) first, deduped.
+  selectedIds() {
+    const { sel, multiSel } = this.state;
+    const ids = [sel];
+    multiSel.forEach((id) => { if (ids.indexOf(id) < 0) ids.push(id); });
+    return ids;
+  }
+  // Collapses `ids` to just the ones that are NOT a descendant of another id also
+  // in the set — acting on an ancestor already covers its descendants, so e.g.
+  // selecting both a branch and one of its own children should only affect the
+  // branch once — returned in left-to-right document order. Used before any bulk
+  // delete/move so nothing gets processed twice, and so a moved/reordered group
+  // keeps its original relative order regardless of click order.
+  orderedTopLevel(ids) {
+    const nodes = this.state.nodes;
+    const set = new Set(ids);
+    const out = [];
+    const walk = (id, covered) => {
+      const hit = set.has(id);
+      if (hit && !covered) out.push(id);
+      nodes[id].children.forEach((c) => walk(c, covered || hit));
+    };
+    walk(this.state.rootId, false);
+    return out;
+  }
+  // Ctrl/Cmd+click on a node: toggle it into/out of the multi-selection. The root
+  // can never join it — it can't be bulk-deleted or bulk-moved anyway (see
+  // removeSel/onUp), so a mixed selection containing it would have no meaning.
+  toggleMultiSelect(id) {
+    if (id === this.state.rootId) return this.toast("中心ノードは複数選択できません");
+    this.setState((s) => {
+      if (s.sel === s.rootId) return { sel: id, multiSel: [], editing: null, selVisible: true };
+      if (id === s.sel) {
+        if (s.multiSel.length) {
+          const ms = s.multiSel.slice();
+          return { sel: ms.pop(), multiSel: ms, editing: null, selVisible: true };
+        }
+        // Nothing else selected: toggling off the only member just hides the ring
+        // (same as clicking empty canvas) rather than jumping `sel` to the root.
+        return { selVisible: false, editing: null };
+      }
+      const idx = s.multiSel.indexOf(id);
+      if (idx >= 0) {
+        const ms = s.multiSel.slice(); ms.splice(idx, 1);
+        return { multiSel: ms, editing: null, selVisible: true };
+      }
+      return { multiSel: s.multiSel.concat([id]), editing: null, selVisible: true };
+    });
+  }
+  // Ctrl/Cmd+A: select every node except the root (it can't join multiSel — same
+  // reasoning as toggleMultiSelect) so a following Delete clears the whole map
+  // back down to just the center node.
+  selectAll() {
+    const { nodes, rootId } = this.state;
+    const ids = Object.keys(nodes).filter((id) => id !== rootId);
+    if (!ids.length) return;
+    this.setState({ sel: ids[0], multiSel: ids.slice(1), editing: null, selVisible: true });
+  }
 
   addNode(parentId, index) {
     const id = this.newId();
@@ -337,7 +401,7 @@ class MindMapApp extends React.Component {
       nodes[parentId].collapsed = false;
       const kids = nodes[parentId].children;
       if (index == null || index >= kids.length) kids.push(id); else kids.splice(index, 0, id);
-    }, { sel: id, editing: id });
+    }, { sel: id, multiSel: [], editing: id });
   }
   addSibling() {
     const { sel, nodes, rootId } = this.state;
@@ -347,13 +411,30 @@ class MindMapApp extends React.Component {
   }
   addChild() { this.addNode(this.state.sel, null); }
 
+  // Deletes each of `ids`' subtrees (assumed already top-level/deduped, no root) in
+  // one undo step, then selects a nearby surviving sibling, or the parent if none
+  // of `ids[0]`'s siblings survive.
+  removeIds(ids) {
+    const { nodes } = this.state;
+    const idSet = new Set(ids);
+    const p = nodes[ids[0]].parent;
+    const siblings = nodes[p].children;
+    const idx = siblings.indexOf(ids[0]);
+    let next = null;
+    for (let i = idx + 1; i < siblings.length && next == null; i++) if (!idSet.has(siblings[i])) next = siblings[i];
+    for (let i = idx - 1; i >= 0 && next == null; i--) if (!idSet.has(siblings[i])) next = siblings[i];
+    if (next == null) next = p;
+    this.mutate((n) => {
+      ids.forEach((id) => { detach(n, id); descendants(n, id).forEach((d) => { delete n[d]; }); });
+    }, { sel: next, multiSel: [], editing: null });
+  }
+  // Deletes every top-level selected node's subtree (see orderedTopLevel). Never
+  // deletes the root; if it's the only thing selected, no-ops with a toast exactly
+  // like the old single-select version did.
   removeSel() {
-    const { sel, nodes, rootId } = this.state;
-    if (sel === rootId) return this.toast("中心ノードは削除できません");
-    const p = nodes[sel].parent;
-    const idx = nodes[p].children.indexOf(sel);
-    const next = nodes[p].children[idx + 1] || nodes[p].children[idx - 1] || p;
-    this.mutate((n) => { detach(n, sel); descendants(n, sel).forEach((d) => { delete n[d]; }); }, { sel: next, editing: null });
+    const ids = this.orderedTopLevel(this.selectedIds()).filter((id) => id !== this.state.rootId);
+    if (!ids.length) return this.toast("中心ノードは削除できません");
+    this.removeIds(ids);
   }
   reorder(delta) {
     const { sel, nodes, rootId } = this.state;
@@ -368,10 +449,13 @@ class MindMapApp extends React.Component {
     });
   }
 
+  // Copy/cut/paste stay single-node (the anchor only) even with a multi-selection
+  // active — unlike delete/drag-move, "cut" implies one clipboard payload, and
+  // extending it to a multi-subtree clip is a separate feature, not this one.
   copy() { this.setState({ clip: JSON.stringify(subtree(this.state.nodes, this.state.sel)) }); this.toast("コピーしました"); }
   cut() {
     if (this.state.sel === this.state.rootId) return this.toast("中心ノードは切り取れません");
-    this.copy(); this.removeSel(); this.toast("切り取りました");
+    this.copy(); this.removeIds([this.state.sel]); this.toast("切り取りました");
   }
   paste() {
     const { clip, sel } = this.state;
@@ -389,10 +473,12 @@ class MindMapApp extends React.Component {
       };
       insert(tree, sel);
     });
-    setTimeout(() => this.setState({ seq, sel: newSel }), 0);
+    setTimeout(() => this.setState({ seq, sel: newSel, multiSel: [] }), 0);
     this.toast("貼り付けました");
   }
 
+  // Arrow-key navigation always settles on a single node — it's moving a cursor,
+  // not extending a selection — so every branch goes through selectOnly().
   move(dir) {
     const { sel, nodes, rootId } = this.state;
     const pos = this.layout();
@@ -405,12 +491,12 @@ class MindMapApp extends React.Component {
       const outward = (dir === outKey && sign >= 0) || (dir === inKey && sign < 0);
       if (outward) {
         if (n.collapsed && n.children.length) return this.mutate((m) => { m[sel].collapsed = false; });
-        if (n.children[0]) this.setState({ sel: n.children[0] });
-        else if (sel === rootId) { const f = nodes[rootId].children[0]; if (f) this.setState({ sel: f }); }
-      } else if (n.parent) this.setState({ sel: n.parent });
+        if (n.children[0]) this.selectOnly(n.children[0]);
+        else if (sel === rootId) { const f = nodes[rootId].children[0]; if (f) this.selectOnly(f); }
+      } else if (n.parent) this.selectOnly(n.parent);
       else {
         const back = nodes[rootId].children.find((c) => pos[c] && pos[c].sign === -1);
-        if (back) this.setState({ sel: back });
+        if (back) this.selectOnly(back);
       }
       return;
     }
@@ -421,11 +507,11 @@ class MindMapApp extends React.Component {
     const i = peers.indexOf(sel);
     const back = dir === "up" || dir === "left";
     const t = peers[back ? i - 1 : i + 1];
-    if (t) this.setState({ sel: t });
+    if (t) this.selectOnly(t);
   }
 
   startEdit(id) {
-    this.setState({ sel: id, editing: id, selVisible: true }, () => {
+    this.setState({ sel: id, multiSel: [], editing: id, selVisible: true }, () => {
       const el = this._inputEls && this._inputEls[id];
       if (el) { el.focus({ preventScroll: true }); el.select(); }
     });
@@ -466,7 +552,7 @@ class MindMapApp extends React.Component {
     };
   }
   onCanvasDown(e) {
-    if (e.button === 0 && e.target === this.canvas) this.setState({ editing: null, selVisible: false });
+    if (e.button === 0 && e.target === this.canvas) this.setState({ editing: null, selVisible: false, multiSel: [] });
     this.drag = { kind: "pan", sx: e.clientX, sy: e.clientY, pan: this.state.pan };
     e.preventDefault();
   }
@@ -478,9 +564,17 @@ class MindMapApp extends React.Component {
     e.stopPropagation();
     if (e.button !== 0) { this.drag = { kind: "pan", sx: e.clientX, sy: e.clientY, pan: this.state.pan }; return; }
     if (this.state.editing === id) return;
-    this.setState({ sel: id, editing: null, selVisible: true }, () => this.focusSel());
+    if (e.metaKey || e.ctrlKey) { this.toggleMultiSelect(id); this.drag = null; return; }
+    // Grabbing a node that's already part of the current multi-selection drags the
+    // whole group together; grabbing anything else collapses to just that node
+    // first (standard multi-select convention — matches Finder/design tools).
+    const inSelection = id === this.state.sel || this.state.multiSel.indexOf(id) >= 0;
+    if (!inSelection) this.setState({ sel: id, multiSel: [], editing: null, selVisible: true }, () => this.focusSel());
+    else if (this.state.editing !== null || !this.state.selVisible) this.setState({ editing: null, selVisible: true });
     if (id === this.state.rootId) { this.drag = null; return; }
-    this.drag = { kind: "node", id, sx: e.clientX, sy: e.clientY, moved: false };
+    const moveIds = this.orderedTopLevel(inSelection ? this.selectedIds() : [id]);
+    const sameParent = moveIds.length <= 1 || moveIds.every((mid) => this.state.nodes[mid].parent === this.state.nodes[moveIds[0]].parent);
+    this.drag = { kind: "node", moveIds, sameParent, sx: e.clientX, sy: e.clientY, moved: false };
     e.preventDefault();
   }
   onMove(e) {
@@ -498,19 +592,21 @@ class MindMapApp extends React.Component {
     const z = this.state.zoom;
     const g = this.toGraph(e);
     const pos = this.layout();
-    const banned = descendants(this.state.nodes, d.id);
+    const banned = d.moveIds.reduce((acc, id) => acc.concat(descendants(this.state.nodes, id)), []);
     let drop = null;
     Object.keys(pos).forEach((id) => {
       if (banned.indexOf(id) >= 0 || drop) return;
       const p = pos[id];
       if (g.x < p.x - p.w / 2 || g.x > p.x + p.w / 2 || g.y < p.y - p.h / 2 || g.y > p.y + p.h / 2) return;
       const t = p.vert ? (g.x - (p.x - p.w / 2)) / p.w : (g.y - (p.y - p.h / 2)) / p.h;
+      // A mixed-parent group can only be reparented ("into") together — there's no
+      // single well-defined sibling slot to slot them all "before/after" into.
       if (id === this.state.rootId) drop = { id, mode: "into" };
-      else if (t < 0.3) drop = { id, mode: "before" };
-      else if (t > 0.7) drop = { id, mode: "after" };
+      else if (t < 0.3) drop = { id, mode: d.sameParent ? "before" : "into" };
+      else if (t > 0.7) drop = { id, mode: d.sameParent ? "after" : "into" };
       else drop = { id, mode: "into" };
     });
-    this.setState({ ghost: { id: d.id, dx: dx / z, dy: dy / z }, drop });
+    this.setState({ ghost: { ids: d.moveIds, dx: dx / z, dy: dy / z }, drop });
   }
   onUp() {
     if (this.sidebarResize) { this.sidebarResize = null; return; }
@@ -518,22 +614,20 @@ class MindMapApp extends React.Component {
     if (!d || d.kind !== "node" || !d.moved) return this.setState({ ghost: null, drop: null });
     const drop = this.state.drop;
     if (!drop) return this.setState({ ghost: null, drop: null });
+    const ids = d.moveIds;
     const nodes = JSON.parse(JSON.stringify(this.state.nodes));
     if (drop.mode === "into") {
-      if (drop.id === nodes[d.id].parent) return this.setState({ ghost: null, drop: null });
-      detach(nodes, d.id);
-      nodes[d.id].parent = drop.id;
-      nodes[drop.id].children.push(d.id);
+      if (ids.every((id) => nodes[id].parent === drop.id)) return this.setState({ ghost: null, drop: null });
+      ids.forEach((id) => { detach(nodes, id); nodes[id].parent = drop.id; nodes[drop.id].children.push(id); });
       nodes[drop.id].collapsed = false;
-      this.toast("付け替えました");
+      this.toast(ids.length > 1 ? "まとめて付け替えました" : "付け替えました");
     } else {
       const parent = nodes[drop.id].parent;
-      detach(nodes, d.id);
-      nodes[d.id].parent = parent;
+      ids.forEach((id) => detach(nodes, id));
       const kids = nodes[parent].children;
       const at = kids.indexOf(drop.id) + (drop.mode === "after" ? 1 : 0);
-      kids.splice(at, 0, d.id);
-      this.toast("並べ替えました");
+      ids.forEach((id, i) => { nodes[id].parent = parent; kids.splice(at + i, 0, id); });
+      this.toast(ids.length > 1 ? "まとめて並べ替えました" : "並べ替えました");
     }
     this.setState((s) => ({ nodes, ghost: null, drop: null, past: s.past.concat(d.snap).slice(-80), future: [], srcDirty: false }));
   }
@@ -574,6 +668,7 @@ class MindMapApp extends React.Component {
     if (meta && k === "c") { e.preventDefault(); this.copy(); return true; }
     if (meta && k === "x") { e.preventDefault(); this.cut(); return true; }
     if (meta && k === "v") { e.preventDefault(); this.paste(); return true; }
+    if (meta && k === "a") { e.preventDefault(); this.selectAll(); return true; }
     if (e.altKey && (e.key === "ArrowUp" || e.key === "ArrowLeft")) { e.preventDefault(); this.reorder(-1); return true; }
     if (e.altKey && (e.key === "ArrowDown" || e.key === "ArrowRight")) { e.preventDefault(); this.reorder(1); return true; }
     if (e.key === "Enter") { e.preventDefault(); this.addSibling(); return true; }
@@ -626,7 +721,7 @@ class MindMapApp extends React.Component {
     if (!this.state.nodes[id]) return;
     const nn = Object.assign({}, this.state.nodes);
     nn[id] = Object.assign({}, nn[id], { text: ch });
-    this.setState({ nodes: nn, sel: id, editing: id, selVisible: true, srcDirty: false }, () => {
+    this.setState({ nodes: nn, sel: id, multiSel: [], editing: id, selVisible: true, srcDirty: false }, () => {
       const el = this._inputEls && this._inputEls[id];
       if (el) { el.focus({ preventScroll: true }); const n = el.value.length; el.setSelectionRange(n, n); }
     });
@@ -710,7 +805,7 @@ class MindMapApp extends React.Component {
     if (!parsed) return this.toast("解釈できませんでした");
     const snap = this.snapshot();
     this.setState((s) => ({
-      nodes: parsed.nodes, rootId: parsed.rootId, seq: parsed.seq, sel: parsed.rootId,
+      nodes: parsed.nodes, rootId: parsed.rootId, seq: parsed.seq, sel: parsed.rootId, multiSel: [],
       editing: null, srcDirty: false, past: s.past.concat(snap).slice(-80), future: []
     }));
     this.toast("ソースを反映しました");
@@ -745,7 +840,7 @@ class MindMapApp extends React.Component {
       const d = JSON.parse(raw);
       const snap = this.snapshot();
       this.setState((s) => ({
-        nodes: d.nodes, rootId: d.rootId, seq: d.seq || 999, sel: d.rootId, editing: null,
+        nodes: d.nodes, rootId: d.rootId, seq: d.seq || 999, sel: d.rootId, multiSel: [], editing: null,
         theme: d.theme || s.theme, dir: d.dir || s.dir,
         srcDirty: false, past: s.past.concat(snap).slice(-80), future: []
       }));
@@ -948,7 +1043,7 @@ class MindMapApp extends React.Component {
       const themeData = this.extractThemeFromSvg(text);
       const snap = this.snapshot();
       this.setState((s) => ({
-        nodes: parsed.nodes, rootId: parsed.rootId, seq: parsed.seq, sel: parsed.rootId, editing: null,
+        nodes: parsed.nodes, rootId: parsed.rootId, seq: parsed.seq, sel: parsed.rootId, multiSel: [], editing: null,
         theme: (themeData && themeData.theme) ? Object.assign({}, s.theme, themeData.theme) : s.theme,
         dir: (themeData && themeData.dir) || s.dir,
         srcDirty: false, past: s.past.concat(snap).slice(-80), future: []
@@ -1022,7 +1117,8 @@ class MindMapApp extends React.Component {
     const pos = this.layout();
     const nodes = s.nodes;
     const ghost = s.ghost;
-    const ghostSet = ghost ? descendants(nodes, ghost.id) : [];
+    const ghostSet = ghost ? ghost.ids.reduce((acc, id) => acc.concat(descendants(nodes, id)), []) : [];
+    const selSet = s.selVisible ? new Set([s.sel].concat(s.multiSel)) : new Set();
 
     // "multi" (カラフル): each top-level branch gets its own ink from MULTI_PALETTE,
     // inherited by all of that branch's descendants; the root stays neutral (paper).
@@ -1081,7 +1177,7 @@ class MindMapApp extends React.Component {
     const nodeViews = Object.keys(pos).map((id) => {
       const n = nodes[id], p = pos[id];
       const isRoot = id === s.rootId;
-      const selected = s.sel === id && s.selVisible;
+      const selected = selSet.has(id);
       const intoTarget = s.drop && s.drop.mode === "into" && s.drop.id === id;
       const editing = s.editing === id;
       const dragging = ghostSet.indexOf(id) >= 0;
@@ -1142,7 +1238,7 @@ class MindMapApp extends React.Component {
           const patch = { nodes: nn, srcDirty: false };
           // First character — a Latin keystroke or the first char of an IME
           // composition — typed on a selected node turns the selection into an edit.
-          if (this.state.sel === id && this.state.editing !== id) patch.editing = id;
+          if (this.state.sel === id && this.state.editing !== id) { patch.editing = id; patch.multiSel = []; }
           this.setState(patch);
         },
         onCompositionStart: () => {
@@ -1152,7 +1248,7 @@ class MindMapApp extends React.Component {
           if (this.state.sel === id && this.state.editing !== id) {
             const el = this._inputEls && this._inputEls[id];
             if (el) el.select();
-            this.setState({ editing: id });
+            this.setState({ editing: id, multiSel: [] });
           }
         },
         onKey: (e) => this.handleNodeKey(id, e),
@@ -1402,7 +1498,7 @@ class MindMapApp extends React.Component {
             </div>
 
             <div className="mm-hints" style={styleObj("position:absolute;left:0;right:0;bottom:0;display:flex;flex-wrap:wrap;align-items:center;gap:6px 14px;padding:10px 16px;font-size:12px;color:var(--color-neutral-700);pointer-events:none")}>
-              <span>Enter 兄弟</span><span>Tab 子</span><span>↑↓←→ 移動</span><span>⌥↑↓ 並べ替え</span><span>F2 編集</span><span>⌫ 削除</span><span>⌘S 保存</span><span>ドラッグ 並べ替え・付け替え</span><span>右ドラッグ 画面移動</span><span>ホイール ズーム</span>
+              <span>Enter 兄弟</span><span>Tab 子</span><span>↑↓←→ 移動</span><span>⌥↑↓ 並べ替え</span><span>F2 編集</span><span>⌫ 削除</span><span>⌘S 保存</span><span>⌘クリック 複数選択</span><span>⌘A 全選択</span><span>ドラッグ 並べ替え・付け替え</span><span>右ドラッグ 画面移動</span><span>ホイール ズーム</span>
               {v.hasToast && <span className="tag tag-accent" style={styleObj("margin-left:auto")}>{v.toast}</span>}
             </div>
           </div>
