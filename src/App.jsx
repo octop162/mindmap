@@ -592,7 +592,21 @@ class MindMapApp extends React.Component {
     return e.key && e.key.length === 1 && !e.metaKey && !e.ctrlKey && !e.altKey;
   }
 
+  // ⌘S/Ctrl+S saves to localStorage instead of triggering the browser's native
+  // "Save Page As" dialog. Checked ahead of every other keydown path — including
+  // mid-edit, where handleNodeKey's unconditional stopPropagation would otherwise
+  // keep it from ever reaching mapShortcut or the window handler below.
+  trySaveShortcut(e) {
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
+      e.preventDefault();
+      this.saveLocal();
+      return true;
+    }
+    return false;
+  }
+
   onKeyDown(e) {
+    if (this.trySaveShortcut(e)) return;
     const t = e.target;
     if (t && (t.tagName === "TEXTAREA" || t.tagName === "INPUT")) return;
     if (this.state.editing) return;
@@ -622,6 +636,7 @@ class MindMapApp extends React.Component {
   // map" keys (when not editing) and the "edit the text" keys (when editing).
   handleNodeKey(id, e) {
     e.stopPropagation();
+    if (this.trySaveShortcut(e)) return;
     const composing = e.nativeEvent ? (e.nativeEvent.isComposing || e.keyCode === 229) : (e.keyCode === 229);
     if (this.state.editing === id) {
       if (composing) return; // let the IME consume Enter/Space/… while a candidate is open
@@ -1245,7 +1260,7 @@ class MindMapApp extends React.Component {
           <div style={styleObj("display:flex;align-items:center;gap:6px")}>
             <button className="btn btn-secondary" style={styleObj("height:36px")} title="mermaidをクリップボードにコピー" onClick={v.copyMermaid}><i className="ph-duotone ph-clipboard" style={styleObj("font-size:16px")}></i><span className="mm-lbl">mermaidをコピー</span></button>
             <button className="btn btn-secondary" style={styleObj("height:36px")} title="SVGとして保存" onClick={v.saveSvg}><i className="ph-duotone ph-image" style={styleObj("font-size:16px")}></i><span className="mm-lbl">SVGで保存</span></button>
-            <button className="btn btn-secondary" style={styleObj("height:36px")} title="localStorageに保存" onClick={v.saveLocal}><i className="ph-duotone ph-floppy-disk" style={styleObj("font-size:16px")}></i><span className="mm-lbl">保存</span></button>
+            <button className="btn btn-secondary" style={styleObj("height:36px")} title="localStorageに保存 (⌘S)" onClick={v.saveLocal}><i className="ph-duotone ph-floppy-disk" style={styleObj("font-size:16px")}></i><span className="mm-lbl">保存</span></button>
             <button className="btn btn-secondary" style={styleObj("height:36px")} title="localStorageから読み込み" onClick={v.loadLocal}><i className="ph-duotone ph-folder-open" style={styleObj("font-size:16px")}></i><span className="mm-lbl">読み込み</span></button>
           </div>
 
@@ -1387,7 +1402,7 @@ class MindMapApp extends React.Component {
             </div>
 
             <div className="mm-hints" style={styleObj("position:absolute;left:0;right:0;bottom:0;display:flex;flex-wrap:wrap;align-items:center;gap:6px 14px;padding:10px 16px;font-size:12px;color:var(--color-neutral-700);pointer-events:none")}>
-              <span>Enter 兄弟</span><span>Tab 子</span><span>↑↓←→ 移動</span><span>⌥↑↓ 並べ替え</span><span>F2 編集</span><span>⌫ 削除</span><span>ドラッグ 並べ替え・付け替え</span><span>右ドラッグ 画面移動</span><span>ホイール ズーム</span>
+              <span>Enter 兄弟</span><span>Tab 子</span><span>↑↓←→ 移動</span><span>⌥↑↓ 並べ替え</span><span>F2 編集</span><span>⌫ 削除</span><span>⌘S 保存</span><span>ドラッグ 並べ替え・付け替え</span><span>右ドラッグ 画面移動</span><span>ホイール ズーム</span>
               {v.hasToast && <span className="tag tag-accent" style={styleObj("margin-left:auto")}>{v.toast}</span>}
             </div>
           </div>
