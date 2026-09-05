@@ -1,12 +1,8 @@
 import React from "react";
 
-const SEED = ["読書メモ", [
-  ["本の情報", [["タイトル"], ["著者"], ["読了日"]]],
-  ["要点", [["問いを先に立てる"], ["記録は短く", [["引用は一行まで"], ["自分の言葉で言い換える"]]], ["再読の間隔を決める"]]],
-  ["引用", [["p.128 余白のメモ"], ["章末の一文"]]],
-  ["感想", [["同意できた点"], ["納得できなかった点"]]],
-  ["次の行動", [["関連書を一冊"], ["週末に読み返す"]]]
-]];
+// Fresh-start tree: just a root, no sample content. buildSeed() still expects the
+// [text, children[]] shape used elsewhere (paste, fromMermaid's tree building).
+const SEED = ["", []];
 
 const SIZES = {
   sm: { fs: 13, padX: 8, padY: 4, maxW: 168, along: 46, cross: 10 },
