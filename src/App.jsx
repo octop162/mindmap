@@ -141,7 +141,7 @@ class MindMapApp extends React.Component {
       this._wheel = (e) => this.onWheel(e);
       this.canvas.addEventListener("wheel", this._wheel, { passive: false });
     }
-    setTimeout(() => this.fit(), 60);
+    setTimeout(() => { this.fit(); this.focusSel(); }, 60);
   }
   componentWillUnmount() {
     window.removeEventListener("keydown", this._key);
@@ -153,6 +153,17 @@ class MindMapApp extends React.Component {
     if (prevState.theme !== this.state.theme || prevState.dir !== this.state.dir
       || prevState.sidebarWidth !== this.state.sidebarWidth || prevState.sidebarOpen !== this.state.sidebarOpen) {
       this.saveSettings();
+    }
+    // Keep the selected node's (visually silent) <input> focused whenever the
+    // selection is shown, so a keystroke — Latin or an IME composition — lands in
+    // it directly without a click first. Never call .select() here: that's reserved
+    // for an explicit edit start (F2 / double-click / type-to-replace) so it can't
+    // clobber the caret mid-typing.
+    const s = this.state;
+    if (s.selVisible && s.sel && (prevState.sel !== s.sel
+      || prevState.selVisible !== s.selVisible || prevState.editing !== s.editing)) {
+      const el = this._inputEls && this._inputEls[s.sel];
+      if (el && document.activeElement !== el) el.focus({ preventScroll: true });
     }
   }
   saveSettings() {
@@ -361,18 +372,33 @@ class MindMapApp extends React.Component {
     if (t) this.setState({ sel: t });
   }
 
-  startEdit(id) { this.setState({ sel: id, editing: id }); }
+  startEdit(id) {
+    this.setState({ sel: id, editing: id, selVisible: true }, () => {
+      const el = this._inputEls && this._inputEls[id];
+      if (el) { el.focus({ preventScroll: true }); el.select(); }
+    });
+  }
+
+  // Focus the selected node's <input> (see componentDidUpdate for why it stays
+  // focused). No-op when nothing is selected or the selection ring is hidden.
+  focusSel() {
+    const el = this._inputEls && this._inputEls[this.state.sel];
+    if (el && this.state.selVisible) el.focus({ preventScroll: true });
+  }
 
   // A stable ref callback per node id. renderVals() runs on every render, so an
   // inline closure here would give React a new `ref` identity each time — React
-  // treats that as the ref detaching and reattaching, which reran the focus/select
-  // below on every keystroke and clobbered typed text with the reselected range.
+  // treats that as the ref detaching and reattaching. It now only records the DOM
+  // node; focus is driven explicitly (focusSel/startEdit/componentDidUpdate) so
+  // that merely selecting a node — which now also mounts its <input> — never
+  // selects that node's text.
   inputRef(id) {
     if (!this._inputRefs) this._inputRefs = {};
+    if (!this._inputEls) this._inputEls = {};
     if (!this._inputRefs[id]) {
       this._inputRefs[id] = (el) => {
-        if (el && this._focused !== id) { this._focused = id; el.focus(); el.select(); }
-        if (!el && this._focused === id) this._focused = null;
+        if (el) this._inputEls[id] = el;
+        else delete this._inputEls[id];
       };
     }
     return this._inputRefs[id];
@@ -400,7 +426,7 @@ class MindMapApp extends React.Component {
     e.stopPropagation();
     if (e.button !== 0) { this.drag = { kind: "pan", sx: e.clientX, sy: e.clientY, pan: this.state.pan }; return; }
     if (this.state.editing === id) return;
-    this.setState({ sel: id, editing: null, selVisible: true });
+    this.setState({ sel: id, editing: null, selVisible: true }, () => this.focusSel());
     if (id === this.state.rootId) { this.drag = null; return; }
     this.drag = { kind: "node", id, sx: e.clientX, sy: e.clientY, moved: false };
     e.preventDefault();
@@ -484,27 +510,83 @@ class MindMapApp extends React.Component {
     this.setState({ zoom: z, pan: { x: -((x1 + x2) / 2) * z, y: -((y1 + y2) / 2) * z } });
   }
 
+  // Map-level shortcuts (navigation, structure, history, clipboard) for the selected
+  // node while it is NOT being edited. Shared by the window key handler (focus on the
+  // canvas) and handleNodeKey (focus in the selected node's own <input>). Returns
+  // true when it consumed the key.
+  mapShortcut(e) {
+    const meta = e.metaKey || e.ctrlKey;
+    const k = e.key.toLowerCase();
+    if (meta && k === "z") { e.preventDefault(); e.shiftKey ? this.redo() : this.undo(); return true; }
+    if (meta && k === "y") { e.preventDefault(); this.redo(); return true; }
+    if (meta && k === "c") { e.preventDefault(); this.copy(); return true; }
+    if (meta && k === "x") { e.preventDefault(); this.cut(); return true; }
+    if (meta && k === "v") { e.preventDefault(); this.paste(); return true; }
+    if (e.altKey && (e.key === "ArrowUp" || e.key === "ArrowLeft")) { e.preventDefault(); this.reorder(-1); return true; }
+    if (e.altKey && (e.key === "ArrowDown" || e.key === "ArrowRight")) { e.preventDefault(); this.reorder(1); return true; }
+    if (e.key === "Enter") { e.preventDefault(); this.addSibling(); return true; }
+    if (e.key === "Tab") { e.preventDefault(); this.addChild(); return true; }
+    if (e.key === "F2") { e.preventDefault(); this.startEdit(this.state.sel); return true; }
+    if (e.key === "Backspace" || e.key === "Delete") { e.preventDefault(); this.removeSel(); return true; }
+    if (e.key === " ") { e.preventDefault(); this.toggleCollapse(this.state.sel); return true; }
+    const map = { ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right" };
+    if (map[e.key]) { e.preventDefault(); this.move(map[e.key]); return true; }
+    return false;
+  }
+
+  // Does e look like a printable character (opens the editor and gets typed in),
+  // rather than a named key like "Enter" / "ArrowUp"?
+  isTypingKey(e) {
+    return e.key && e.key.length === 1 && !e.metaKey && !e.ctrlKey && !e.altKey;
+  }
+
   onKeyDown(e) {
     const t = e.target;
     if (t && (t.tagName === "TEXTAREA" || t.tagName === "INPUT")) return;
     if (this.state.editing) return;
     if (!this.state.selVisible) this.setState({ selVisible: true });
-    const meta = e.metaKey || e.ctrlKey;
-    const k = e.key.toLowerCase();
-    if (meta && k === "z") { e.preventDefault(); return e.shiftKey ? this.redo() : this.undo(); }
-    if (meta && k === "y") { e.preventDefault(); return this.redo(); }
-    if (meta && k === "c") { e.preventDefault(); return this.copy(); }
-    if (meta && k === "x") { e.preventDefault(); return this.cut(); }
-    if (meta && k === "v") { e.preventDefault(); return this.paste(); }
-    if (e.altKey && (e.key === "ArrowUp" || e.key === "ArrowLeft")) { e.preventDefault(); return this.reorder(-1); }
-    if (e.altKey && (e.key === "ArrowDown" || e.key === "ArrowRight")) { e.preventDefault(); return this.reorder(1); }
-    if (e.key === "Enter") { e.preventDefault(); return this.addSibling(); }
-    if (e.key === "Tab") { e.preventDefault(); return this.addChild(); }
-    if (e.key === "F2") { e.preventDefault(); return this.startEdit(this.state.sel); }
-    if (e.key === "Backspace" || e.key === "Delete") { e.preventDefault(); return this.removeSel(); }
-    if (e.key === " ") { e.preventDefault(); return this.toggleCollapse(this.state.sel); }
-    const map = { ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right" };
-    if (map[e.key]) { e.preventDefault(); return this.move(map[e.key]); }
+    if (this.mapShortcut(e)) return;
+    // Focus is on the canvas, not the selected node's <input> (e.g. right after a
+    // toolbar button click). Begin editing on a printable key so typing still works;
+    // IME composition needs the input pre-focused and isn't available on this path
+    // (the input-focused path in handleNodeKey covers it).
+    if (this.isTypingKey(e)) { e.preventDefault(); this.beginTypeEdit(this.state.sel, e.key); }
+  }
+
+  // Enter edit mode on `id` with `ch` as its (replacement) text and the caret at the
+  // end. Only for a key typed while the canvas — not the node's input — had focus,
+  // so the character can't fall through into the input on its own.
+  beginTypeEdit(id, ch) {
+    if (!this.state.nodes[id]) return;
+    const nn = Object.assign({}, this.state.nodes);
+    nn[id] = Object.assign({}, nn[id], { text: ch });
+    this.setState({ nodes: nn, sel: id, editing: id, selVisible: true, srcDirty: false }, () => {
+      const el = this._inputEls && this._inputEls[id];
+      if (el) { el.focus({ preventScroll: true }); const n = el.value.length; el.setSelectionRange(n, n); }
+    });
+  }
+
+  // Keydown from the selected node's own <input>: it owns both the "navigate the
+  // map" keys (when not editing) and the "edit the text" keys (when editing).
+  handleNodeKey(id, e) {
+    e.stopPropagation();
+    const composing = e.nativeEvent ? (e.nativeEvent.isComposing || e.keyCode === 229) : (e.keyCode === 229);
+    if (this.state.editing === id) {
+      if (composing) return; // let the IME consume Enter/Space/… while a candidate is open
+      if (e.key === "Enter") { e.preventDefault(); this.setState({ editing: null }); setTimeout(() => this.addSibling(), 0); }
+      else if (e.key === "Tab") { e.preventDefault(); this.setState({ editing: null }); setTimeout(() => this.addChild(), 0); }
+      else if (e.key === "Escape") { e.preventDefault(); this.setState({ editing: null }); }
+      return; // any other key: ordinary text editing inside the input
+    }
+    if (composing) return; // an IME composition is starting on the selected node → onCompositionStart handles it
+    if (this.mapShortcut(e)) return;
+    if (this.isTypingKey(e)) {
+      // Printable key on a selected-but-not-editing node: select the old text so this
+      // keystroke replaces it, then let the character fall through into the input
+      // (NOT preventDefault-ed — that's what lets the browser, and the IME, insert it).
+      const el = this._inputEls && this._inputEls[id];
+      if (el) el.select();
+    }
   }
   toggleCollapse(id) {
     if (!this.state.nodes[id].children.length) return;
@@ -781,7 +863,11 @@ class MindMapApp extends React.Component {
   pick(e, fn) {
     fn();
     if (e && e.target && e.target.blur) e.target.blur();
-    if (this.canvas) this.canvas.focus();
+    // Return focus to the selected node's input so map shortcuts (and typing) keep
+    // working; fall back to the canvas when nothing is selected.
+    const el = this._inputEls && this._inputEls[this.state.sel];
+    if (el && this.state.selVisible) el.focus({ preventScroll: true });
+    else if (this.canvas) this.canvas.focus();
   }
   setTheme(k, v) { this.mcache = {}; this.setState((s) => ({ theme: Object.assign({}, s.theme, { [k]: v }) })); }
   setDir(v) { this.setState({ dir: v }); setTimeout(() => this.fit(), 30); }
@@ -859,7 +945,7 @@ class MindMapApp extends React.Component {
       const dragging = ghostSet.indexOf(id) >= 0;
       const padY = isRoot ? m.padY + 2 : m.padY;
 
-      let box = "display:flex;align-items:center;justify-content:center;text-align:center;box-sizing:border-box;"
+      let box = "position:relative;display:flex;align-items:center;justify-content:center;text-align:center;box-sizing:border-box;"
         + "width:100%;min-height:" + p.h + "px;padding:" + padY + "px " + m.padX + "px;"
         + "font-size:" + m.fs + "px;line-height:1.5;cursor:grab;"
         + (p.lines === 1 ? "white-space:nowrap;" : "overflow-wrap:anywhere;")
@@ -891,13 +977,19 @@ class MindMapApp extends React.Component {
       const hidden = n.collapsed ? n.children.length : 0;
 
       return {
-        id, text: n.text, editing, showText: !editing,
+        id, text: n.text, editing, showInput: editing || selected, showText: !editing,
         wrap: "position:absolute;left:" + p.x + "px;top:" + p.y + "px;width:" + p.w + "px;"
           + "transform:translate(-50%,-50%) translate(" + gx + "px," + gy + "px);"
           + (dragging ? "opacity:0.5;" : "")
           + "z-index:" + (dragging ? 9 : selected ? 5 : 2) + ";",
         box,
-        inputStyle: "width:100%;border:none;outline:none;background:transparent;text-align:center;font:inherit;color:inherit;padding:0;caret-color:var(--color-accent);",
+        // Editing: an ordinary centered text field. Selected only: the same field
+        // kept mounted but visually silent (transparent text, no caret, click-through)
+        // and pulled out of flow so the wrapped <span> underneath still shows — it is
+        // there purely to hold focus so a keystroke or IME composition starts in place.
+        inputStyle: editing
+          ? "width:100%;border:none;outline:none;background:transparent;text-align:center;font:inherit;color:inherit;padding:0;caret-color:var(--color-accent);"
+          : "position:absolute;top:0;left:0;width:100%;height:100%;opacity:0;pointer-events:none;border:none;outline:none;background:transparent;text-align:center;font:inherit;color:transparent;caret-color:transparent;padding:0;",
         inputRef: this.inputRef(id),
         onDown: (e) => this.onNodeDown(id, e),
         onEdit: (e) => { e.stopPropagation(); this.startEdit(id); },
@@ -905,14 +997,23 @@ class MindMapApp extends React.Component {
           const v = e.target.value;
           const nn = Object.assign({}, this.state.nodes);
           nn[id] = Object.assign({}, nn[id], { text: v });
-          this.setState({ nodes: nn, srcDirty: false });
+          const patch = { nodes: nn, srcDirty: false };
+          // First character — a Latin keystroke or the first char of an IME
+          // composition — typed on a selected node turns the selection into an edit.
+          if (this.state.sel === id && this.state.editing !== id) patch.editing = id;
+          this.setState(patch);
         },
-        onKey: (e) => {
-          e.stopPropagation();
-          if (e.key === "Enter") { e.preventDefault(); this.setState({ editing: null }); setTimeout(() => this.addSibling(), 0); }
-          else if (e.key === "Tab") { e.preventDefault(); this.setState({ editing: null }); setTimeout(() => this.addChild(), 0); }
-          else if (e.key === "Escape") { e.preventDefault(); this.setState({ editing: null }); }
+        onCompositionStart: () => {
+          // IME composition started while the node was only selected: select the old
+          // text so the composed string replaces it, and switch to the visible editor
+          // now so the unconfirmed characters show in place while composing.
+          if (this.state.sel === id && this.state.editing !== id) {
+            const el = this._inputEls && this._inputEls[id];
+            if (el) el.select();
+            this.setState({ editing: id });
+          }
         },
+        onKey: (e) => this.handleNodeKey(id, e),
         onBlur: () => { if (this.state.editing === id) this.setState({ editing: null }); },
         hasHidden: hidden > 0,
         hiddenCount: hidden,
@@ -1138,8 +1239,8 @@ class MindMapApp extends React.Component {
               {v.nodeViews.map((n) => (
                 <div key={n.id} style={styleObj(n.wrap)}>
                   <div style={styleObj(n.box)} onMouseDown={n.onDown} onDoubleClick={n.onEdit}>
-                    {n.editing && (
-                      <input value={n.text} ref={n.inputRef} onChange={n.onInput} onKeyDown={n.onKey} onBlur={n.onBlur} style={styleObj(n.inputStyle)} />
+                    {n.showInput && (
+                      <input value={n.text} ref={n.inputRef} onChange={n.onInput} onKeyDown={n.onKey} onCompositionStart={n.onCompositionStart} onBlur={n.onBlur} style={styleObj(n.inputStyle)} />
                     )}
                     {n.showText && <span>{n.text}</span>}
                   </div>
