@@ -39,6 +39,22 @@ function loadSettings() {
     return {};
   }
 }
+// Separate again from both STORE and SETTINGS_STORE: a debounced, silent backup of
+// the tree itself (nodes/rootId/seq only — theme/dir already autosave via
+// SETTINGS_STORE), written on every edit so a crash/reload/closed-tab doesn't lose
+// work the user never explicitly 保存'd. STORE stays a manual, user-controlled
+// checkpoint independent of this.
+const AUTOSAVE_STORE = "mm-autosave-v1";
+function loadAutosave() {
+  try {
+    const raw = localStorage.getItem(AUTOSAVE_STORE);
+    if (!raw) return null;
+    const d = JSON.parse(raw);
+    return (d && d.nodes && d.rootId && d.nodes[d.rootId]) ? d : null;
+  } catch (e) {
+    return null;
+  }
+}
 const SIDEBAR_MIN = 220;
 const SIDEBAR_MAX = 640;
 
@@ -100,11 +116,15 @@ class MindMapApp extends React.Component {
   constructor(props) {
     super(props);
     const seed = buildSeed(SEED);
+    const autosave = loadAutosave();
+    this._restoredFromAutosave = !!autosave;
     const saved = loadSettings();
     const savedTheme = saved.theme || {};
     this.state = {
-      nodes: seed.nodes, rootId: seed.rootId, seq: seed.seq,
-      sel: seed.rootId, selVisible: true, editing: null,
+      nodes: autosave ? autosave.nodes : seed.nodes,
+      rootId: autosave ? autosave.rootId : seed.rootId,
+      seq: autosave ? (autosave.seq || 999) : seed.seq,
+      sel: autosave ? autosave.rootId : seed.rootId, selVisible: true, editing: null,
       pan: { x: 0, y: 0 }, zoom: 1,
       sidebarOpen: saved.sidebarOpen != null ? saved.sidebarOpen : this.props.sidebarOpen !== false,
       sidebarWidth: saved.sidebarWidth || 330,
@@ -142,17 +162,26 @@ class MindMapApp extends React.Component {
       this.canvas.addEventListener("wheel", this._wheel, { passive: false });
     }
     setTimeout(() => { this.fit(); this.focusSel(); }, 60);
+    if (this._restoredFromAutosave) this.toast("自動保存から復元しました");
+    this._beforeUnload = () => this.autosave();
+    window.addEventListener("beforeunload", this._beforeUnload);
   }
   componentWillUnmount() {
     window.removeEventListener("keydown", this._key);
     window.removeEventListener("mousemove", this._move);
     window.removeEventListener("mouseup", this._up);
+    window.removeEventListener("beforeunload", this._beforeUnload);
     if (this.canvas && this._wheel) this.canvas.removeEventListener("wheel", this._wheel);
+    clearTimeout(this._autosaveT);
+    this.autosave();
   }
   componentDidUpdate(prevProps, prevState) {
     if (prevState.theme !== this.state.theme || prevState.dir !== this.state.dir
       || prevState.sidebarWidth !== this.state.sidebarWidth || prevState.sidebarOpen !== this.state.sidebarOpen) {
       this.saveSettings();
+    }
+    if (prevState.nodes !== this.state.nodes || prevState.rootId !== this.state.rootId || prevState.seq !== this.state.seq) {
+      this.scheduleAutosave();
     }
     // Keep the selected node's (visually silent) <input> focused whenever the
     // selection is shown, so a keystroke — Latin or an IME composition — lands in
@@ -171,6 +200,20 @@ class MindMapApp extends React.Component {
       localStorage.setItem(SETTINGS_STORE, JSON.stringify({
         theme: this.state.theme, dir: this.state.dir,
         sidebarWidth: this.state.sidebarWidth, sidebarOpen: this.state.sidebarOpen
+      }));
+    } catch (e) { /* best-effort; a full/unavailable localStorage shouldn't break the app */ }
+  }
+  // Debounced so rapid edits (typing, dragging) don't hit localStorage on every
+  // keystroke; flushed immediately on unmount/beforeunload so a closed tab never
+  // loses more than the in-flight debounce window.
+  scheduleAutosave() {
+    clearTimeout(this._autosaveT);
+    this._autosaveT = setTimeout(() => this.autosave(), 800);
+  }
+  autosave() {
+    try {
+      localStorage.setItem(AUTOSAVE_STORE, JSON.stringify({
+        nodes: this.state.nodes, rootId: this.state.rootId, seq: this.state.seq
       }));
     } catch (e) { /* best-effort; a full/unavailable localStorage shouldn't break the app */ }
   }

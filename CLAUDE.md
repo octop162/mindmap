@@ -46,10 +46,11 @@ This is a single-page mind-mapping editor: one React class component (`src/App.j
 
 `buildSvg()` does **not** serialize the DOM (nodes are absolutely-positioned `<div>`s, not SVG) — it independently re-derives the same layout/ink/shape/invert decisions as `renderVals()`'s node/edge builders, but resolving every `var(--color-*)` (including `color-mix()` values) to a concrete `rgb()`/`rgba()` string via a hidden probe element (`resolveColor()`), and wrapping text itself with the canvas context (`wrapLines()`) since SVG `<text>` doesn't wrap. If you change how nodes/edges are colored or shaped in `renderVals()`, check whether `buildSvg()` needs the equivalent change — the two are intentionally independent implementations, not shared code.
 
-### Persistence — two separate localStorage keys, don't conflate them
+### Persistence — three separate localStorage keys, don't conflate them
 
-- `mm-doc-v1` (`STORE`): the document itself (nodes/rootId/seq + theme/dir as a convenience bundle). Only written/read on the explicit 保存/読み込み buttons (`saveLocal()`/`loadLocal()`).
+- `mm-doc-v1` (`STORE`): the document itself (nodes/rootId/seq + theme/dir as a convenience bundle). Only written/read on the explicit 保存/読み込み buttons (`saveLocal()`/`loadLocal()`) — a user-controlled checkpoint, independent of autosave below.
 - `mm-settings-v1` (`SETTINGS_STORE`): UI/theme preferences (theme, dir, sidebarWidth, sidebarOpen). Auto-saved on every relevant change via `componentDidUpdate` (reference/value comparison against `prevState`), auto-loaded in the constructor via `loadSettings()`. Current defaults (when nothing is saved) are ink=`multi`, invert=`true`, svgTransparentBg=`true`, size=`lg`, edge=`curve`, dir=`both-h`.
+- `mm-autosave-v1` (`AUTOSAVE_STORE`): a silent, debounced (800ms, via `scheduleAutosave()`) backup of just `{nodes, rootId, seq}`, written whenever `componentDidUpdate` sees any of those three change, and flushed immediately on `beforeunload`/unmount so a closed tab loses at most the in-flight debounce window. Auto-loaded in the constructor via `loadAutosave()` (which validates `nodes[rootId]` exists, falling back to `buildSeed(SEED)` on anything missing/corrupt) — this is what the app opens with on a fresh reload, not the seed, unless nothing has ever been autosaved. A toast ("自動保存から復元しました") fires once on mount when this path was taken. It intentionally does not carry theme/dir (already covered by `SETTINGS_STORE`) and is never touched by the manual 保存/読み込み buttons.
 - Boolean settings that default to `true` (`invert`, `svgTransparentBg`) must be read back with an explicit `!== undefined` check, not `||` — `||` would silently stomp an explicitly-saved `false` back to the `true` default on the next load.
 
 ### Event wiring gotcha
