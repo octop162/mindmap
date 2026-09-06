@@ -231,10 +231,19 @@ class MindMapApp extends React.Component {
     const key = m.fs + "|" + (bold ? 1 : 0) + "|" + text;
     if (this.mcache[key]) return this.mcache[key];
     this.mctx.font = (bold ? "600 " : "400 ") + m.fs + 'px "Source Serif 4","Noto Serif JP",serif';
-    const raw = this.mctx.measureText(text || "　").width;
+    // Explicit "\n"s (from Shift+Enter) are measured/wrapped per segment: width is
+    // the widest segment (capped at maxW), lines is the sum of each segment's own
+    // wrap count.
+    const segs = String(text || "").split("\n");
+    let maxRaw = 0, lines = 0;
+    segs.forEach((seg) => {
+      const raw = this.mctx.measureText(seg).width;
+      if (raw > maxRaw) maxRaw = raw;
+      lines += raw <= m.maxW ? 1 : Math.ceil(raw / m.maxW);
+    });
+    if (!text) maxRaw = this.mctx.measureText("　").width; // empty node: keep the old placeholder-driven minimum width
+    const w = Math.min(maxRaw, m.maxW);
     const lh = Math.round(m.fs * 1.5);
-    let w, lines;
-    if (raw <= m.maxW) { w = raw; lines = 1; } else { w = m.maxW; lines = Math.ceil(raw / m.maxW); }
     const out = { w: Math.max(Math.ceil(w) + m.padX * 2 + 10, 46), h: lines * lh + m.padY * 2, lines };
     this.mcache[key] = out;
     return out;
@@ -732,7 +741,10 @@ class MindMapApp extends React.Component {
     const composing = e.nativeEvent ? (e.nativeEvent.isComposing || e.keyCode === 229) : (e.keyCode === 229);
     if (this.state.editing === id) {
       if (composing) return; // let the IME consume Enter/Space/… while a candidate is open
-      if (e.key === "Enter") { e.preventDefault(); this.setState({ editing: null }); setTimeout(() => this.addSibling(), 0); }
+      if (e.key === "Enter") {
+        if (e.shiftKey) return; // let the textarea insert a literal "\n"
+        e.preventDefault(); this.setState({ editing: null }); // confirm only — no sibling added
+      }
       else if (e.key === "Tab") { e.preventDefault(); this.setState({ editing: null }); setTimeout(() => this.addChild(), 0); }
       else if (e.key === "Escape") { e.preventDefault(); this.setState({ editing: null }); }
       return; // any other key: ordinary text editing inside the input
@@ -757,7 +769,9 @@ class MindMapApp extends React.Component {
     const { nodes, rootId } = this.state;
     const lines = ["mindmap"];
     const walk = (id, depth) => {
-      const txt = nodes[id].text || " ";
+      // The mindmap dialect is one node per line, so a literal "\n" (from Shift+Enter)
+      // would split into extra lines on round-trip — encode it as mermaid's own <br/>.
+      const txt = (nodes[id].text || " ").split("\n").join("<br/>");
       lines.push("  ".repeat(depth + 1) + (depth === 0 ? "root((" + txt + "))" : txt));
       nodes[id].children.forEach((k) => walk(k, depth + 1));
     };
@@ -777,7 +791,8 @@ class MindMapApp extends React.Component {
     const clean = (s) => s.trim()
       .replace(/^root\s*\(\(([\s\S]*)\)\)$/, "$1")
       .replace(/^\(\(([\s\S]*)\)\)$/, "$1")
-      .trim();
+      .trim()
+      .replace(/<br\s*\/?>/gi, "\n"); // undo toMermaid()'s "\n" → <br/> encoding
 
     let rootId = null;
     const stack = [];
@@ -863,20 +878,28 @@ class MindMapApp extends React.Component {
     return getComputedStyle(this._colorProbe).color || raw;
   }
   // Greedy any-character wrap, mirroring the canvas nodes' CSS (overflow-wrap:anywhere)
-  // since SVG <text> never wraps on its own.
+  // since SVG <text> never wraps on its own. Explicit "\n"s (from Shift+Enter) are
+  // split first — each segment wraps independently — so a manual line break always
+  // survives the export even if it wouldn't have needed wrapping on its own.
   wrapLines(text, bold) {
     const m = this.metrics();
     this.mctx.font = (bold ? "600 " : "400 ") + m.fs + 'px "Source Serif 4","Noto Serif JP",serif';
-    const chars = Array.from(text || "");
-    if (!chars.length) return [""];
+    const wrapSeg = (seg) => {
+      const chars = Array.from(seg);
+      if (!chars.length) return [""];
+      const lines = [];
+      let cur = "";
+      for (const ch of chars) {
+        const test = cur + ch;
+        if (cur && this.mctx.measureText(test).width > m.maxW) { lines.push(cur); cur = ch; }
+        else cur = test;
+      }
+      lines.push(cur);
+      return lines;
+    };
+    const segs = String(text || "").split("\n");
     const lines = [];
-    let cur = "";
-    for (const ch of chars) {
-      const test = cur + ch;
-      if (cur && this.mctx.measureText(test).width > m.maxW) { lines.push(cur); cur = ch; }
-      else cur = test;
-    }
-    lines.push(cur);
+    segs.forEach((seg) => { wrapSeg(seg).forEach((ln) => lines.push(ln)); });
     return lines;
   }
   buildSvg() {
@@ -1179,11 +1202,14 @@ class MindMapApp extends React.Component {
       const editing = s.editing === id;
       const dragging = ghostSet.indexOf(id) >= 0;
       const padY = isRoot ? m.padY + 2 : m.padY;
+      // Same line-height measure()/buildSvg() use, so the <span>, the editing
+      // <textarea>, and the offscreen-canvas height math all agree pixel-for-pixel.
+      const lh = Math.round(m.fs * 1.5);
 
       let box = "position:relative;display:flex;align-items:center;justify-content:center;text-align:center;box-sizing:border-box;"
         + "width:100%;min-height:" + p.h + "px;padding:" + padY + "px " + m.padX + "px;"
-        + "font-size:" + m.fs + "px;line-height:1.5;cursor:grab;"
-        + (p.lines === 1 ? "white-space:nowrap;" : "overflow-wrap:anywhere;")
+        + "font-size:" + m.fs + "px;line-height:" + lh + "px;cursor:grab;"
+        + (p.lines === 1 ? "white-space:nowrap;" : "white-space:pre-wrap;overflow-wrap:anywhere;")
         + "font-family:'Source Serif 4','Noto Serif JP',serif;";
       const nodeInk = branchColorOf(id);
       const colorize = multiMode || p.depth === 1;
@@ -1223,8 +1249,9 @@ class MindMapApp extends React.Component {
         // and pulled out of flow so the wrapped <span> underneath still shows — it is
         // there purely to hold focus so a keystroke or IME composition starts in place.
         inputStyle: editing
-          ? "width:100%;border:none;outline:none;background:transparent;text-align:center;font:inherit;color:inherit;padding:0;caret-color:var(--color-accent);"
-          : "position:absolute;top:0;left:0;width:100%;height:100%;opacity:0;pointer-events:none;border:none;outline:none;background:transparent;text-align:center;font:inherit;color:transparent;caret-color:transparent;padding:0;",
+          ? "width:100%;height:" + (p.lines * lh) + "px;border:none;outline:none;background:transparent;text-align:center;font:inherit;"
+            + "line-height:" + lh + "px;color:inherit;padding:0;caret-color:var(--color-accent);resize:none;overflow:hidden;white-space:pre-wrap;overflow-wrap:anywhere;"
+          : "position:absolute;top:0;left:0;width:100%;height:100%;opacity:0;pointer-events:none;border:none;outline:none;background:transparent;text-align:center;font:inherit;color:transparent;caret-color:transparent;padding:0;resize:none;overflow:hidden;",
         inputRef: this.inputRef(id),
         onDown: (e) => this.onNodeDown(id, e),
         onEdit: (e) => { e.stopPropagation(); this.startEdit(id); },
@@ -1482,7 +1509,7 @@ class MindMapApp extends React.Component {
                 <div key={n.id} style={styleObj(n.wrap)}>
                   <div style={styleObj(n.box)} onMouseDown={n.onDown} onDoubleClick={n.onEdit}>
                     {n.showInput && (
-                      <input value={n.text} ref={n.inputRef} onChange={n.onInput} onKeyDown={n.onKey} onCompositionStart={n.onCompositionStart} onBlur={n.onBlur} style={styleObj(n.inputStyle)} />
+                      <textarea value={n.text} ref={n.inputRef} onChange={n.onInput} onKeyDown={n.onKey} onCompositionStart={n.onCompositionStart} onBlur={n.onBlur} style={styleObj(n.inputStyle)} />
                     )}
                     {n.showText && <span>{n.text}</span>}
                   </div>
@@ -1495,7 +1522,7 @@ class MindMapApp extends React.Component {
             </div>
 
             <div className="mm-hints" style={styleObj("position:absolute;left:0;right:0;bottom:0;display:flex;flex-wrap:wrap;align-items:center;gap:6px 14px;padding:10px 16px;font-size:12px;color:var(--color-neutral-700);pointer-events:none")}>
-              <span>Enter 兄弟</span><span>Tab 子</span><span>↑↓←→ 移動</span><span>⌥↑↓ 並べ替え</span><span>F2 編集</span><span>⌫ 削除</span><span>⌘S 保存</span><span>⌘クリック 複数選択</span><span>⌘A 全選択</span><span>⌘⇧H 全体表示</span><span>ドラッグ 並べ替え・付け替え</span><span>右ドラッグ 画面移動</span><span>ホイール ズーム</span>
+              <span>Enter 兄弟・確定</span><span>⇧Enter 改行</span><span>Tab 子</span><span>↑↓←→ 移動</span><span>⌥↑↓ 並べ替え</span><span>F2 編集</span><span>⌫ 削除</span><span>⌘S 保存</span><span>⌘クリック 複数選択</span><span>⌘A 全選択</span><span>⌘⇧H 全体表示</span><span>ドラッグ 並べ替え・付け替え</span><span>右ドラッグ 画面移動</span><span>ホイール ズーム</span>
               {v.hasToast && <span className="tag tag-accent" style={styleObj("margin-left:auto")}>{v.toast}</span>}
             </div>
           </div>
