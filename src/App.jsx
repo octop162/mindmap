@@ -53,6 +53,14 @@ function loadAutosave() {
 }
 const SIDEBAR_MIN = 220;
 const SIDEBAR_MAX = 640;
+// The Google Fonts the app renders with (mirrors index.html's <link> + styles.css's
+// @import). buildFontStyle() pulls just the subsets covering an export's glyphs from
+// these and inlines them as base64 @font-face rules so a saved .svg renders with the
+// real fonts as a standalone file, not the viewer's generic `serif` fallback.
+const SVG_FONT_CSS_URLS = [
+  "https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,wght@0,400;0,600;1,400&display=swap",
+  "https://fonts.googleapis.com/css2?family=Noto+Serif+JP:wght@400;600;700&display=swap"
+];
 
 function buildSeed(seed) {
   const nodes = {}; let seq = 1;
@@ -990,7 +998,61 @@ class MindMapApp extends React.Component {
     segs.forEach((seg) => { wrapSeg(seg).forEach((ln) => lines.push(ln)); });
     return lines;
   }
-  buildSvg() {
+  // Fetches the Google Fonts subsets (from SVG_FONT_CSS_URLS) that cover `codepoints`
+  // and returns an SVG <style> block inlining them as base64 @font-face rules, so
+  // buildSvg()'s <text> renders with the real fonts anywhere — as an <img>, offline,
+  // in Illustrator, etc. — not just on a page that already loaded them. If any fetch
+  // fails it falls back to a plain @import (which only helps when the .svg is later
+  // opened online in a browser); `this._svgFontFallback` records that for the toast.
+  async buildFontStyle(codepoints) {
+    const cps = codepoints.filter((c) => Number.isFinite(c));
+    const hits = (a, b) => cps.some((c) => c >= a && c <= b);
+    const parseRanges = (ur) => ur.split(",").map((t) => t.trim()).map((t) => {
+      const m = t.match(/^U\+([0-9A-Fa-f?]+)(?:-([0-9A-Fa-f]+))?$/);
+      if (!m) return null;
+      if (m[1].indexOf("?") >= 0) return [parseInt(m[1].replace(/\?/g, "0"), 16), parseInt(m[1].replace(/\?/g, "F"), 16)];
+      return [parseInt(m[1], 16), m[2] ? parseInt(m[2], 16) : parseInt(m[1], 16)];
+    }).filter(Boolean);
+    const tail = "\ntext{font-family:'Source Serif 4','Noto Serif JP',serif;}\n";
+    try {
+      const byUrl = new Map(); // woff2 url -> { family, style, ur, weights:Set }
+      for (const cssUrl of SVG_FONT_CSS_URLS) {
+        const css = await fetch(cssUrl).then((r) => { if (!r.ok) throw new Error("css " + r.status); return r.text(); });
+        for (const raw of css.split("@font-face").slice(1)) {
+          const b = raw.slice(0, raw.indexOf("}"));
+          const url = (b.match(/url\((https:\/\/[^)]+\.woff2)\)/) || [])[1];
+          if (!url) continue;
+          const ranges = parseRanges((b.match(/unicode-range:\s*([^;]+);/) || [])[1] || "U+0-10FFFF");
+          if (!ranges.some(([a, c]) => hits(a, c))) continue;
+          const rec = byUrl.get(url) || {
+            family: (b.match(/font-family:\s*(['"])(.*?)\1/) || [])[2] || "",
+            style: ((b.match(/font-style:\s*([^;]+);/) || [])[1] || "normal").trim(),
+            ur: ((b.match(/unicode-range:\s*([^;]+);/) || [])[1] || "U+0-10FFFF").trim(),
+            weights: new Set()
+          };
+          ((b.match(/font-weight:\s*([^;]+);/) || [])[1] || "400").trim().split(/\s+/).forEach((w) => rec.weights.add(+w));
+          byUrl.set(url, rec);
+        }
+      }
+      const faces = [];
+      for (const [url, rec] of byUrl) {
+        const buf = await fetch(url).then((r) => { if (!r.ok) throw new Error("woff2 " + r.status); return r.arrayBuffer(); });
+        const bytes = new Uint8Array(buf);
+        let bin = "";
+        for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+        const ws = [...rec.weights].sort((a, b) => a - b);
+        const fw = ws.length > 1 ? ws[0] + " " + ws[ws.length - 1] : (ws[0] || 400);
+        faces.push("@font-face{font-family:'" + rec.family + "';font-style:" + rec.style + ";font-weight:" + fw
+          + ";font-display:swap;src:url(data:font/woff2;base64," + btoa(bin) + ") format('woff2');unicode-range:" + rec.ur + ";}");
+      }
+      return faces.length ? "<style><![CDATA[\n" + faces.join("\n") + tail + "]]></style>" : "";
+    } catch (e) {
+      console.warn("SVG font embed failed; falling back to @import", e);
+      this._svgFontFallback = true;
+      return "<style><![CDATA[" + SVG_FONT_CSS_URLS.map((u) => "@import url('" + u + "');").join("") + tail + "]]></style>";
+    }
+  }
+  buildSvg(fontStyle) {
     const s = this.state;
     const m = this.metrics();
     const ink = INK[s.theme.ink] || INK.cyan;
@@ -1115,6 +1177,7 @@ class MindMapApp extends React.Component {
     const themeMetadata = '<metadata id="mindmap-theme"><![CDATA[' + themeJson + ']]></metadata>';
     return '<?xml version="1.0" encoding="UTF-8"?>\n'
       + '<svg xmlns="http://www.w3.org/2000/svg" viewBox="' + x1 + ' ' + y1 + ' ' + W + ' ' + H + '" width="' + Math.round(W) + '" height="' + Math.round(H) + '">'
+      + (fontStyle || "")
       + metadata
       + themeMetadata
       + bgRect
@@ -1183,12 +1246,21 @@ class MindMapApp extends React.Component {
     if (!/\.svg$/i.test(file.name)) return this.toast("SVGファイルをドロップしてください");
     this.loadSvgFile(file);
   }
-  saveSvg() {
+  async saveSvg() {
     try {
-      const svg = this.buildSvg();
+      const { nodes } = this.state;
+      // Every glyph in the map, plus a Latin seed so the Source Serif 4 latin subset
+      // always comes along for digits/ASCII even in an all-Japanese map.
+      let allText = " 0Aa";
+      Object.keys(nodes).forEach((id) => { allText += (nodes[id].text || "") + " "; });
+      const cps = [...new Set([...allText].map((ch) => ch.codePointAt(0)))];
+      this._svgFontFallback = false;
+      this.toast("SVGを書き出し中…");
+      const fontStyle = await this.buildFontStyle(cps);
+      const svg = this.buildSvg(fontStyle);
       const blob = new Blob([svg], { type: "image/svg+xml" });
       const url = URL.createObjectURL(blob);
-      const name = ((this.state.nodes[this.state.rootId].text || "").trim() || "mindmap").replace(/[\\/:*?"<>|]/g, "_");
+      const name = ((nodes[this.state.rootId].text || "").trim() || "mindmap").replace(/[\\/:*?"<>|]/g, "_");
       const a = document.createElement("a");
       a.href = url;
       a.download = name + ".mindmap.svg";
@@ -1196,7 +1268,7 @@ class MindMapApp extends React.Component {
       a.click();
       document.body.removeChild(a);
       setTimeout(() => URL.revokeObjectURL(url), 1000);
-      this.toast("SVGを保存しました");
+      this.toast(this._svgFontFallback ? "SVGを保存しました（フォントは参照のみ）" : "SVGを保存しました");
     } catch (e) { console.error(e); this.toast("SVGの保存に失敗しました"); }
   }
 
