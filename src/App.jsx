@@ -135,7 +135,7 @@ class MindMapApp extends React.Component {
         svgTransparentBg: savedTheme.svgTransparentBg !== undefined ? savedTheme.svgTransparentBg : true
       },
       past: [], future: [], clip: null,
-      src: "", srcDirty: false, drop: null, ghost: null, toast: "", dragOverFile: false
+      src: "", srcDirty: false, drop: null, ghost: null, marquee: null, toast: "", dragOverFile: false
     };
     this.mctx = document.createElement("canvas").getContext("2d");
     this.mcache = {};
@@ -557,30 +557,47 @@ class MindMapApp extends React.Component {
     };
   }
   onCanvasDown(e) {
-    if (e.button === 0 && e.target === this.canvas) this.setState({ editing: null, selVisible: false, multiSel: [] });
-    this.drag = { kind: "pan", sx: e.clientX, sy: e.clientY, pan: this.state.pan };
+    // Left button drags out a rubber-band selection box (committed in onUp /
+    // commitMarquee); right / middle button pans the view. The primary pan
+    // gesture is the wheel — see onWheel.
+    if (e.button === 0) {
+      this.drag = { kind: "marquee", sx: e.clientX, sy: e.clientY, additive: e.shiftKey, moved: false };
+    } else {
+      this.drag = { kind: "pan", sx: e.clientX, sy: e.clientY, pan: this.state.pan };
+    }
     e.preventDefault();
   }
   onSidebarResizeDown(e) {
     this.sidebarResize = { sx: e.clientX, w: this.state.sidebarWidth };
     e.preventDefault();
   }
-  onNodeDown(id, e) {
-    e.stopPropagation();
-    if (e.button !== 0) { this.drag = { kind: "pan", sx: e.clientX, sy: e.clientY, pan: this.state.pan }; return; }
-    if (this.state.editing === id) return;
-    if (e.metaKey || e.ctrlKey) { this.toggleMultiSelect(id); this.drag = null; return; }
-    // Grabbing a node that's already part of the current multi-selection drags the
-    // whole group together; grabbing anything else collapses to just that node
-    // first (standard multi-select convention — matches Finder/design tools).
+  // Arm a move/reparent drag for `id` on mousedown: selects `id` first if it
+  // isn't already (so a press-and-drag on a fresh node moves it in one gesture),
+  // or keeps the whole current selection if `id` is part of it. The actual move
+  // only happens once onMove clears the 4px threshold — a press with no drag just
+  // leaves `id` selected, i.e. a plain click. The root can't be moved, so it only
+  // ever gets (re)selected.
+  startNodeMove(id, e) {
+    this.drag = null;
     const inSelection = id === this.state.sel || this.state.multiSel.indexOf(id) >= 0;
     if (!inSelection) this.setState({ sel: id, multiSel: [], editing: null, selVisible: true }, () => this.focusSel());
     else if (this.state.editing !== null || !this.state.selVisible) this.setState({ editing: null, selVisible: true });
-    if (id === this.state.rootId) { this.drag = null; return; }
+    if (id === this.state.rootId) return;
     const moveIds = this.orderedTopLevel(inSelection ? this.selectedIds() : [id]);
     const sameParent = moveIds.length <= 1 || moveIds.every((mid) => this.state.nodes[mid].parent === this.state.nodes[moveIds[0]].parent);
     this.drag = { kind: "node", moveIds, sameParent, sx: e.clientX, sy: e.clientY, moved: false };
     e.preventDefault();
+  }
+  onNodeDown(id, e) {
+    e.stopPropagation();
+    if (this.state.editing === id) return;
+    if (e.button === 1) { this.drag = { kind: "pan", sx: e.clientX, sy: e.clientY, pan: this.state.pan }; return; }
+    if (e.button !== 0 && e.button !== 2) return;
+    if (e.button === 0 && (e.metaKey || e.ctrlKey)) { this.toggleMultiSelect(id); this.drag = null; return; }
+    // Left- or right-press on a node arms a move (select-then-drag in one motion,
+    // dragging the whole selection if the node is part of it). A rubber-band
+    // selection is only started from the empty canvas (onCanvasDown).
+    this.startNodeMove(id, e);
   }
   onMove(e) {
     const r = this.sidebarResize;
@@ -592,6 +609,18 @@ class MindMapApp extends React.Component {
     if (!d) return;
     const dx = e.clientX - d.sx, dy = e.clientY - d.sy;
     if (d.kind === "pan") return this.setState({ pan: { x: d.pan.x + dx, y: d.pan.y + dy } });
+    if (d.kind === "marquee") {
+      if (!d.moved && Math.abs(dx) + Math.abs(dy) < 4) return;
+      d.moved = true;
+      const cr = this.canvas.getBoundingClientRect();
+      const rect = {
+        x: Math.min(d.sx, e.clientX) - cr.left, y: Math.min(d.sy, e.clientY) - cr.top,
+        w: Math.abs(e.clientX - d.sx), h: Math.abs(e.clientY - d.sy)
+      };
+      rect.hits = this.marqueeHits(rect);
+      rect.additive = d.additive;
+      return this.setState({ marquee: rect });
+    }
     if (!d.moved && Math.abs(dx) + Math.abs(dy) < 4) return;
     if (!d.moved) { d.moved = true; d.snap = this.snapshot(); }
     const z = this.state.zoom;
@@ -616,6 +645,7 @@ class MindMapApp extends React.Component {
   onUp() {
     if (this.sidebarResize) { this.sidebarResize = null; return; }
     const d = this.drag; this.drag = null;
+    if (d && d.kind === "marquee") return this.commitMarquee(d);
     if (!d || d.kind !== "node" || !d.moved) return this.setState({ ghost: null, drop: null });
     const drop = this.state.drop;
     if (!drop) return this.setState({ ghost: null, drop: null });
@@ -636,15 +666,73 @@ class MindMapApp extends React.Component {
     }
     this.setState((s) => ({ nodes, ghost: null, drop: null, past: s.past.concat(d.snap).slice(-80), future: [], srcDirty: false }));
   }
+  // Ids of the visible nodes whose box intersects the given screen-space rectangle
+  // ({x, y, w, h} in canvas-local px), in document order. Feeds both the live
+  // marquee preview (onMove) and the commit (commitMarquee).
+  marqueeHits(rect) {
+    const r = this.canvas.getBoundingClientRect();
+    const a = this.toGraph({ clientX: r.left + rect.x, clientY: r.top + rect.y });
+    const b = this.toGraph({ clientX: r.left + rect.x + rect.w, clientY: r.top + rect.y + rect.h });
+    const gx1 = Math.min(a.x, b.x), gx2 = Math.max(a.x, b.x);
+    const gy1 = Math.min(a.y, b.y), gy2 = Math.max(a.y, b.y);
+    const pos = this.layout();
+    const nodes = this.state.nodes;
+    const out = [];
+    (function walk(id) {
+      if (!nodes[id]) return;
+      const p = pos[id];
+      if (p && !(p.x + p.w / 2 < gx1 || p.x - p.w / 2 > gx2 || p.y + p.h / 2 < gy1 || p.y - p.h / 2 > gy2)) out.push(id);
+      (nodes[id].children || []).forEach(walk);
+    })(this.state.rootId);
+    return out;
+  }
+  // Finalize a rubber-band selection. Nodes caught by the box become the selection
+  // (anchor = first in document order, the rest go to multiSel — the root can be
+  // the anchor but never a multiSel entry). An empty box, or a plain click with no
+  // drag, just hides the ring — the "click empty canvas to deselect" convention.
+  // Holding Shift keeps the current selection and adds to it.
+  commitMarquee(d) {
+    const m = this.state.marquee;
+    if (!d.moved || !m) {
+      return this.setState(d.additive ? { marquee: null, editing: null } : { marquee: null, editing: null, selVisible: false, multiSel: [] });
+    }
+    let hits = m.hits || this.marqueeHits(m);
+    if (d.additive) {
+      const prev = new Set(this.selectedIds());
+      const nodes = this.state.nodes, merged = [];
+      (function walk(id) {
+        if (!nodes[id]) return;
+        if (prev.has(id) || hits.indexOf(id) >= 0) merged.push(id);
+        (nodes[id].children || []).forEach(walk);
+      })(this.state.rootId);
+      hits = merged;
+    }
+    if (!hits.length) {
+      return this.setState(d.additive ? { marquee: null, editing: null } : { marquee: null, editing: null, selVisible: false, multiSel: [] });
+    }
+    const sel = hits[0];
+    const multiSel = hits.slice(1).filter((id) => id !== this.state.rootId);
+    this.setState({ marquee: null, sel, multiSel, selVisible: true, editing: null }, () => this.focusSel());
+  }
   onWheel(e) {
     e.preventDefault();
     const r = this.canvas.getBoundingClientRect();
-    const cx = r.width / 2, cy = r.height / 2;
-    const mx = e.clientX - r.left, my = e.clientY - r.top;
-    const { pan, zoom } = this.state;
-    const z2 = Math.min(2.6, Math.max(0.25, zoom * Math.exp(-e.deltaY * 0.0016)));
-    const gx = (mx - cx - pan.x) / zoom, gy = (my - cy - pan.y) / zoom;
-    this.setState({ zoom: z2, pan: { x: mx - cx - z2 * gx, y: my - cy - z2 * gy } });
+    if (e.ctrlKey || e.metaKey) {
+      // Zoom toward the cursor. Trackpad pinch also arrives here — the browser
+      // reports it as a wheel event with ctrlKey set.
+      const cx = r.width / 2, cy = r.height / 2;
+      const mx = e.clientX - r.left, my = e.clientY - r.top;
+      const { pan, zoom } = this.state;
+      const z2 = Math.min(2.6, Math.max(0.25, zoom * Math.exp(-e.deltaY * 0.0016)));
+      const gx = (mx - cx - pan.x) / zoom, gy = (my - cy - pan.y) / zoom;
+      return this.setState({ zoom: z2, pan: { x: mx - cx - z2 * gx, y: my - cy - z2 * gy } });
+    }
+    // Plain wheel pans vertically; Shift+wheel pans horizontally (many mice/OSes
+    // already swap the axis themselves, hence the `px === 0` guard).
+    const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? r.height : 1;
+    let px = e.deltaX * unit, py = e.deltaY * unit;
+    if (e.shiftKey && px === 0) { px = py; py = 0; }
+    this.setState((s) => ({ pan: { x: s.pan.x - px, y: s.pan.y - py } }));
   }
   setZoom(z) { this.setState({ zoom: Math.min(2.6, Math.max(0.25, z)) }); }
   fit() {
@@ -1139,6 +1227,13 @@ class MindMapApp extends React.Component {
     const ghost = s.ghost;
     const ghostSet = ghost ? ghost.ids.reduce((acc, id) => acc.concat(descendants(nodes, id)), []) : [];
     const selSet = s.selVisible ? new Set([s.sel].concat(s.multiSel)) : new Set();
+    // Nodes currently inside the live rubber-band box — drawn with the selection
+    // ring as a preview, but not yet the real selection (that lands in commitMarquee).
+    const previewSet = s.marquee && s.marquee.hits && s.marquee.hits.length ? new Set(s.marquee.hits) : null;
+    // While a plain (non-additive) marquee is being dragged, hide the standing
+    // selection ring so the box shows exactly what it's about to select; an
+    // additive (Shift) marquee keeps it, since it adds rather than replaces.
+    const ringSet = s.marquee && !s.marquee.additive ? new Set() : selSet;
 
     // "multi" (カラフル): each top-level branch gets its own ink from MULTI_PALETTE,
     // inherited by all of that branch's descendants; the root stays neutral (paper).
@@ -1197,7 +1292,7 @@ class MindMapApp extends React.Component {
     const nodeViews = Object.keys(pos).map((id) => {
       const n = nodes[id], p = pos[id];
       const isRoot = id === s.rootId;
-      const selected = selSet.has(id);
+      const selected = ringSet.has(id) || (previewSet !== null && previewSet.has(id));
       const intoTarget = s.drop && s.drop.mode === "into" && s.drop.id === id;
       const editing = s.editing === id;
       const dragging = ghostSet.indexOf(id) >= 0;
@@ -1208,7 +1303,7 @@ class MindMapApp extends React.Component {
 
       let box = "position:relative;display:flex;align-items:center;justify-content:center;text-align:center;box-sizing:border-box;"
         + "width:100%;min-height:" + p.h + "px;padding:" + padY + "px " + m.padX + "px;"
-        + "font-size:" + m.fs + "px;line-height:" + lh + "px;cursor:grab;"
+        + "font-size:" + m.fs + "px;line-height:" + lh + "px;cursor:pointer;"
         + (p.lines === 1 ? "white-space:nowrap;" : "white-space:pre-wrap;overflow-wrap:anywhere;")
         + "font-family:'Source Serif 4','Noto Serif JP',serif;";
       const nodeInk = branchColorOf(id);
@@ -1238,7 +1333,7 @@ class MindMapApp extends React.Component {
       const hidden = n.collapsed ? n.children.length : 0;
 
       return {
-        id, text: n.text, editing, showInput: editing || selected, showText: !editing,
+        id, text: n.text, editing, showInput: editing || selSet.has(id), showText: !editing,
         wrap: "position:absolute;left:" + p.x + "px;top:" + p.y + "px;width:" + p.w + "px;"
           + "transform:translate(-50%,-50%) translate(" + gx + "px," + gy + "px);"
           + (dragging ? "opacity:0.5;" : "")
@@ -1329,6 +1424,7 @@ class MindMapApp extends React.Component {
       onCanvasDown: (e) => this.onCanvasDown(e),
       onCanvasDouble: (e) => { if (e.target === this.canvas) this.fit(); },
       noMenu: (e) => e.preventDefault(),
+      marquee: s.marquee,
       dragOverFile: s.dragOverFile,
       onCanvasDragOver: (e) => this.onCanvasDragOver(e),
       onCanvasDragLeave: (e) => this.onCanvasDragLeave(e),
@@ -1487,7 +1583,7 @@ class MindMapApp extends React.Component {
                       <label className="seg-opt">大<input type="radio" name="mmsize" checked={v.sizeLg} onChange={v.setSizeLg} style={styleObj("position:absolute;opacity:0;width:0;height:0")} /></label>
                     </div>
                   </div>
-                  <p style={styleObj("font-size:12.5px;color:var(--color-neutral-700);margin:0")}>配置は展開方向から自動で決まります。ドラッグはノードの端に落とすと並べ替え、中央に落とすとその子として付け替えです。</p>
+                  <p style={styleObj("font-size:12.5px;color:var(--color-neutral-700);margin:0")}>配置は展開方向から自動で決まります。ノードをドラッグして端に落とすと並べ替え、中央に落とすとその子として付け替えです。余白のドラッグは範囲選択です。</p>
                 </div>
               )}
             </div>
@@ -1521,8 +1617,15 @@ class MindMapApp extends React.Component {
               {v.hasDropLine && <div style={styleObj(v.dropLine)} />}
             </div>
 
+            {v.marquee && (
+              <div style={styleObj("position:absolute;pointer-events:none;z-index:20;"
+                + "left:" + v.marquee.x + "px;top:" + v.marquee.y + "px;"
+                + "width:" + v.marquee.w + "px;height:" + v.marquee.h + "px;"
+                + "border:1px solid var(--color-accent);background:color-mix(in srgb, var(--color-accent) 14%, transparent);")} />
+            )}
+
             <div className="mm-hints" style={styleObj("position:absolute;left:0;right:0;bottom:0;display:flex;flex-wrap:wrap;align-items:center;gap:6px 14px;padding:10px 16px;font-size:12px;color:var(--color-neutral-700);pointer-events:none")}>
-              <span>Enter 兄弟・確定</span><span>⇧Enter 改行</span><span>Tab 子</span><span>↑↓←→ 移動</span><span>⌥↑↓ 並べ替え</span><span>F2 編集</span><span>⌫ 削除</span><span>⌘S 保存</span><span>⌘クリック 複数選択</span><span>⌘A 全選択</span><span>⌘⇧H 全体表示</span><span>ドラッグ 並べ替え・付け替え</span><span>右ドラッグ 画面移動</span><span>ホイール ズーム</span>
+              <span>Enter 兄弟・確定</span><span>⇧Enter 改行</span><span>Tab 子</span><span>↑↓←→ 移動</span><span>⌥↑↓ 並べ替え</span><span>F2 編集</span><span>⌫ 削除</span><span>⌘S 保存</span><span>⌘クリック 複数選択</span><span>⌘A 全選択</span><span>⌘⇧H 全体表示</span><span>ノードをドラッグ 並べ替え・付け替え</span><span>余白をドラッグ 範囲選択</span><span>⇧ドラッグ 追加選択</span><span>ホイール 画面移動 (⇧横)</span><span>⌘ホイール ズーム</span>
               {v.hasToast && <span className="tag tag-accent" style={styleObj("margin-left:auto")}>{v.toast}</span>}
             </div>
           </div>
